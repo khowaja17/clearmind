@@ -1,0 +1,18 @@
+/* The App component carries its own theme; this just frames it on the page. */
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #e9e3d6;
+  min-height: 100vh;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+}
+#root {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 18px;
+}
+/* In an installed PWA window there's no browser chrome; give it a little breathing room. */
+@media (display-mode: standalone) {
+  #root { padding: 10px; }
+}
