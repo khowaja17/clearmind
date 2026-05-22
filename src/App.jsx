@@ -22,6 +22,7 @@ const KEYS = {
   areas: "gtd:areas",
   horizons: "gtd:horizons",
   game: "gtd:game",
+  meta: "gtd:meta",
 };
 const hasSandbox = typeof window !== "undefined" && window.storage;
 const hasLocal = (() => {
@@ -57,6 +58,59 @@ const store = {
     }
   },
 };
+
+/* ============================================================================
+   VERSIONING & MIGRATIONS
+   APP_VERSION is the single monotonic spine. On load we compare it to the version
+   recorded in the user's saved meta:
+     - no meta            → brand-new user → Welcome onboarding
+     - meta.version < APP → returning user → run pending migrations, then "What's New"
+     - meta.version == APP→ up to date     → straight into the app
+   Each entry in MIGRATIONS optionally carries a `migrate(all)` that reshapes stored
+   data, and a `notes` array shown in the changelog. To ship a change: bump APP_VERSION,
+   add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
+   only renames/shape-changes do.
+============================================================================ */
+const APP_VERSION = 4;
+
+// Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
+// settings, areas, horizons, game } — return the same shape (mutated copies are fine).
+const MIGRATIONS = {
+  4: {
+    notes: [
+      "Personalized welcome — Clearmind now greets you by name.",
+      "Seed your Goals, Vision & Purpose during onboarding.",
+      "Added a versioned upgrade system so future updates never disturb your saved progress.",
+    ],
+    migrate: (all) => {
+      // v3→v4 is purely additive (name + meta). Defensive backfills only — no destructive changes.
+      const game = all.game || {};
+      if (!Array.isArray(game.ownedGear)) game.ownedGear = ["skin-default", "avatar-drifter"];
+      if (!game.equipped) game.equipped = { avatar: "avatar-drifter", skin: "skin-default", strip: null };
+      const horizons = all.horizons || {};
+      horizons.goals = Array.isArray(horizons.goals) ? horizons.goals : [];
+      horizons.vision = Array.isArray(horizons.vision) ? horizons.vision : [];
+      horizons.purpose = Array.isArray(horizons.purpose) ? horizons.purpose : [];
+      return { ...all, game, horizons };
+    },
+  },
+};
+
+// Runs every migration with introducedVersion in (fromVersion, APP_VERSION].
+function runMigrations(all, fromVersion) {
+  let data = all;
+  const pending = [];
+  for (let v = fromVersion + 1; v <= APP_VERSION; v++) {
+    const m = MIGRATIONS[v];
+    if (m) {
+      if (typeof m.migrate === "function") {
+        try { data = m.migrate(data) || data; } catch (e) { console.error("migration", v, "failed", e); }
+      }
+      if (Array.isArray(m.notes)) pending.push({ version: v, notes: m.notes });
+    }
+  }
+  return { data, pending };
+}
 
 /* ============================================================================
    HELPERS
@@ -718,22 +772,61 @@ export default function App() {
   const [editId, setEditId] = useState(null);
   const [ctxMgrOpen, setCtxMgrOpen] = useState(false);
   const [openArea, setOpenArea] = useState(null);
+  const [meta, setMeta] = useState({ version: APP_VERSION, name: "" });
+  const [onboarding, setOnboarding] = useState(false);
+  const [whatsNew, setWhatsNew] = useState(null); // array of {version, notes} or null
   const captureRef = useRef(null);
 
-  // ---- load ----
+  // ---- load (with version detection + migrations) ----
   useEffect(() => {
     (async () => {
-      setItems(await store.load(KEYS.items, []));
-      setProjects(await store.load(KEYS.projects, []));
-      setHabits(await store.load(KEYS.habits, []));
-      setLog(await store.load(KEYS.log, {}));
-      setSettings(await store.load(KEYS.settings, { contexts: DEFAULT_CONTEXTS, lastReview: null }));
-      setAreas(await store.load(KEYS.areas, []));
-      setHorizons(await store.load(KEYS.horizons, { goals: [], vision: [], purpose: [] }));
-      setGame(await store.load(KEYS.game, { xp: 0, gtd: 0, ownedGear: ["skin-default", "avatar-drifter"], equipped: { avatar: "avatar-drifter", skin: "skin-default", strip: null }, lastTended: null, siegeBrokenAt: null, inSiege: false }));
+      // load everything first
+      const loaded = {
+        items: await store.load(KEYS.items, []),
+        projects: await store.load(KEYS.projects, []),
+        habits: await store.load(KEYS.habits, []),
+        log: await store.load(KEYS.log, {}),
+        settings: await store.load(KEYS.settings, { contexts: DEFAULT_CONTEXTS, lastReview: null }),
+        areas: await store.load(KEYS.areas, []),
+        horizons: await store.load(KEYS.horizons, { goals: [], vision: [], purpose: [] }),
+        game: await store.load(KEYS.game, { xp: 0, gtd: 0, ownedGear: ["skin-default", "avatar-drifter"], equipped: { avatar: "avatar-drifter", skin: "skin-default", strip: null }, lastTended: null, siegeBrokenAt: null, inSiege: false }),
+      };
+      const savedMeta = await store.load(KEYS.meta, null);
+
+      // decide: new user, returning-outdated, or current
+      const isNew = !savedMeta || typeof savedMeta.version !== "number";
+      if (isNew) {
+        // brand-new: stamp current version, open onboarding
+        const m = { version: APP_VERSION, name: "", createdAt: Date.now() };
+        setMeta(m); store.save(KEYS.meta, m);
+        applyLoaded(loaded);
+        setOnboarding(true);
+      } else if (savedMeta.version < APP_VERSION) {
+        // returning on an old save: migrate data, persist, show What's New
+        const { data, pending } = runMigrations(loaded, savedMeta.version);
+        applyLoaded(data);
+        // persist any reshaped slices
+        store.save(KEYS.game, data.game);
+        store.save(KEYS.horizons, data.horizons);
+        store.save(KEYS.settings, data.settings);
+        const m = { ...savedMeta, version: APP_VERSION };
+        setMeta(m); store.save(KEYS.meta, m);
+        if (pending.length) setWhatsNew(pending);
+      } else {
+        // up to date
+        setMeta(savedMeta);
+        applyLoaded(loaded);
+      }
       setLoaded(true);
     })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // helper to push a loaded/migrated bundle into state
+  function applyLoaded(d) {
+    setItems(d.items); setProjects(d.projects); setHabits(d.habits); setLog(d.log);
+    setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
+  }
 
   // ---- persisted setters ----
   const saveItems = (v) => { setItems(v); store.save(KEYS.items, v); };
@@ -744,6 +837,23 @@ export default function App() {
   const saveAreas = (v) => { setAreas(v); store.save(KEYS.areas, v); };
   const saveHorizons = (v) => { setHorizons(v); store.save(KEYS.horizons, v); };
   const saveGame = (v) => { setGame(v); store.save(KEYS.game, v); };
+  const saveMeta = (v) => { setMeta(v); store.save(KEYS.meta, v); };
+
+  // ---- onboarding completion: persist name + seed GVP into horizons ----
+  const finishOnboarding = ({ name, goals, vision, purpose }) => {
+    saveMeta({ ...meta, version: APP_VERSION, name: (name || "").trim() });
+    const add = (arr, texts) => {
+      const extra = (texts || []).filter((t) => t && t.trim()).map((t) => ({ id: uid(), text: t.trim(), areaId: null }));
+      return [...(arr || []), ...extra];
+    };
+    const nh = {
+      goals: add(horizons.goals, goals),
+      vision: add(horizons.vision, vision),
+      purpose: add(horizons.purpose, purpose),
+    };
+    saveHorizons(nh);
+    setOnboarding(false);
+  };
 
   // ---- survival rewards ----
   const pushToast = (msg) => {
@@ -934,19 +1044,25 @@ export default function App() {
 
   // ---- export / import ----
   const exportData = () => JSON.stringify({
-    version: 3, exportedAt: new Date().toISOString(), items, projects, habits, log, settings, areas, horizons, game,
+    version: APP_VERSION, exportedAt: new Date().toISOString(), items, projects, habits, log, settings, areas, horizons, game, meta,
   }, null, 2);
   const importData = (text) => {
     try {
       const d = JSON.parse(text);
-      if (d.items) saveItems(d.items);
-      if (d.projects) saveProjects(d.projects);
-      if (d.habits) saveHabits(d.habits);
-      if (d.log) saveLog(d.log);
-      if (d.settings) saveSettings(d.settings);
-      if (d.areas) saveAreas(d.areas);
-      if (d.horizons) saveHorizons(d.horizons);
-      if (d.game) saveGame(d.game);
+      // assemble a bundle, run migrations if the file predates the current app version
+      let bundle = {
+        items: d.items || [], projects: d.projects || [], habits: d.habits || [],
+        log: d.log || {}, settings: d.settings || { contexts: DEFAULT_CONTEXTS, lastReview: null },
+        areas: d.areas || [], horizons: d.horizons || { goals: [], vision: [], purpose: [] },
+        game: d.game || game,
+      };
+      const fromV = typeof d.version === "number" ? d.version : 0;
+      if (fromV < APP_VERSION) bundle = runMigrations(bundle, fromV).data;
+      saveItems(bundle.items); saveProjects(bundle.projects); saveHabits(bundle.habits);
+      saveLog(bundle.log); saveSettings(bundle.settings); saveAreas(bundle.areas);
+      saveHorizons(bundle.horizons); saveGame(bundle.game);
+      const importedMeta = d.meta && typeof d.meta === "object" ? d.meta : meta;
+      saveMeta({ ...importedMeta, version: APP_VERSION });
       setExportOpen(false);
     } catch (e) { alert("Invalid file"); }
   };
@@ -1097,7 +1213,7 @@ export default function App() {
 
         <div style={{ flex: 1, overflow: "auto", padding: "22px" }}>
           {view === "watchtower" && <Watchtower {...{ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit: setEditId, buyGear, equipGear }} />}
-          {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items }} />}
+          {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items, name: meta.name }} />}
           {view === "inbox" && <InboxView {...{ inbox, setClarifyId }} />}
           {view === "next" && <NextView {...{ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, projName, count: filteredNexts.length, blockedCount, onEdit: setEditId, onManageCtx: () => setCtxMgrOpen(true), items }} />}
           {view === "projects" && <ProjectsView {...{ activeProjects, allItems: items, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit: setEditId, areas, assignProjectArea }} />}
@@ -1132,6 +1248,8 @@ export default function App() {
           onSave={(list) => { saveSettings({ ...settings, contexts: list }); setCtxMgrOpen(false); }} />
       )}
       {exportOpen && <ExportModal text={exportData()} onClose={() => setExportOpen(false)} onImport={importData} />}
+      {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
+      {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
   );
 }
@@ -1179,12 +1297,13 @@ function ActionRow({ item, toggleDone, projName, showCtx, onEdit, items }) {
   );
 }
 
-function TodayView({ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit, items }) {
+function TodayView({ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit, items, name }) {
   const todayScheduled = scheduled.filter((i) => i.dueDate <= todayStr());
+  const first = (name || "").trim().split(" ")[0];
   return (
     <div className="stagger">
       <SectionTitle sub={new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}>
-        Good to see you
+        {first ? `Good to see you, ${first}` : "Good to see you"}
       </SectionTitle>
 
       {inbox.length > 0 && (
@@ -2122,6 +2241,105 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function WelcomeModal({ onFinish }) {
+  const [step, setStep] = useState(0);
+  const [name, setName] = useState("");
+  const [goals, setGoals] = useState("");
+  const [vision, setVision] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const lines = (s) => s.split("\n").map((x) => x.trim()).filter(Boolean);
+  const finish = (skipGVP) => onFinish({
+    name,
+    goals: skipGVP ? [] : lines(goals),
+    vision: skipGVP ? [] : lines(vision),
+    purpose: skipGVP ? [] : lines(purpose),
+  });
+
+  return (
+    <div className="overlay" style={{ alignItems: "center" }}>
+      <div className="card rise" style={{ width: 560, maxWidth: "100%", padding: 26 }}>
+        {step === 0 && (
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 14 }}>
+              <div style={{ width: 38, height: 38, borderRadius: 10, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Sparkles size={20} color="#fbf9f4" />
+              </div>
+              <div>
+                <div className="serif" style={{ fontSize: 23, lineHeight: 1 }}>Welcome to Clearmind</div>
+                <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1, marginTop: 3 }}>A GTD SURVIVAL SYSTEM</div>
+              </div>
+            </div>
+            <p style={{ fontSize: 14, color: "var(--ink2)", lineHeight: 1.5, marginTop: 0 }}>
+              The world outside is everything unprocessed in your head. The settlement you'll defend is your trusted system — capture it all, clear it, and keep your mind like water. First, what should we call you?
+            </p>
+            <input className="input" autoFocus placeholder="Your name" value={name}
+              onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) setStep(1); }} style={{ marginTop: 6 }} />
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 20 }}>
+              <button className="btn btn-accent" disabled={!name.trim()} style={{ opacity: name.trim() ? 1 : .5 }} onClick={() => setStep(1)}>
+                Continue <ArrowRight size={15} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 1 && (
+          <div className="rise">
+            <div className="serif" style={{ fontSize: 21, marginBottom: 4 }}>The Signal, {name.trim().split(" ")[0]}</div>
+            <p style={{ fontSize: 13.5, color: "var(--ink2)", lineHeight: 1.5, marginTop: 4 }}>
+              Before the tasks, the why. These are GTD's higher horizons — what you're walking toward. Jot whatever comes to mind (one per line), or skip and add them later from the Goals · Vision · Purpose tab.
+            </p>
+            <div style={{ marginTop: 14 }}>
+              <div className="tag-ink" style={{ fontSize: 12.5, marginBottom: 5, display: "flex", alignItems: "center", gap: 6 }}><Target size={13} color="var(--amber)" /> Goals — next 1–2 years</div>
+              <textarea className="input" rows={2} placeholder={"Finish the dissertation\nRun a half marathon"} value={goals} onChange={(e) => setGoals(e.target.value)} style={{ resize: "vertical" }} />
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <div className="tag-ink" style={{ fontSize: 12.5, marginBottom: 5, display: "flex", alignItems: "center", gap: 6 }}><Mountain size={13} color="var(--pine)" /> Vision — 3–5 years out</div>
+              <textarea className="input" rows={2} placeholder={"The kind of work and life I'm building toward"} value={vision} onChange={(e) => setVision(e.target.value)} style={{ resize: "vertical" }} />
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <div className="tag-ink" style={{ fontSize: 12.5, marginBottom: 5, display: "flex", alignItems: "center", gap: 6 }}><Sparkles size={13} color="var(--clay)" /> Purpose — why any of it matters</div>
+              <textarea className="input" rows={2} placeholder={"The principles I hold to"} value={purpose} onChange={(e) => setPurpose(e.target.value)} style={{ resize: "vertical" }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20 }}>
+              <button className="btn btn-ghost" onClick={() => finish(true)}>Skip for now</button>
+              <button className="btn btn-accent" onClick={() => finish(false)}><Check size={15} /> Enter the settlement</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WhatsNewModal({ name, entries, onClose }) {
+  return (
+    <div className="overlay" style={{ alignItems: "center" }}>
+      <div className="card rise" style={{ width: 520, maxWidth: "100%", padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+          <Sparkles size={18} color="var(--pine)" />
+          <div className="serif" style={{ fontSize: 21 }}>What's New{name ? `, ${name.split(" ")[0]}` : ""}</div>
+        </div>
+        <p style={{ fontSize: 13, color: "var(--ink2)", marginTop: 0 }}>Your progress carried over untouched — here's what changed since you were last here.</p>
+        <div style={{ maxHeight: 320, overflow: "auto", marginTop: 8 }}>
+          {[...entries].sort((a, b) => b.version - a.version).map((e) => (
+            <div key={e.version} style={{ marginBottom: 14 }}>
+              <div className="mono" style={{ fontSize: 10.5, color: "var(--pine)", letterSpacing: 1, marginBottom: 6 }}>VERSION {e.version}</div>
+              {e.notes.map((n, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, fontSize: 13.5, color: "var(--ink)", padding: "3px 0" }}>
+                  <span style={{ color: "var(--pine)", flexShrink: 0 }}>›</span>{n}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+          <button className="btn btn-accent" onClick={onClose}>Got it</button>
+        </div>
       </div>
     </div>
   );
