@@ -71,7 +71,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 4;
+const APP_VERSION = 5;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -83,7 +83,6 @@ const MIGRATIONS = {
       "Added a versioned upgrade system so future updates never disturb your saved progress.",
     ],
     migrate: (all) => {
-      // v3→v4 is purely additive (name + meta). Defensive backfills only — no destructive changes.
       const game = all.game || {};
       if (!Array.isArray(game.ownedGear)) game.ownedGear = ["skin-default", "avatar-drifter"];
       if (!game.equipped) game.equipped = { avatar: "avatar-drifter", skin: "skin-default", strip: null };
@@ -92,6 +91,22 @@ const MIGRATIONS = {
       horizons.vision = Array.isArray(horizons.vision) ? horizons.vision : [];
       horizons.purpose = Array.isArray(horizons.purpose) ? horizons.purpose : [];
       return { ...all, game, horizons };
+    },
+  },
+  5: {
+    notes: [
+      "Restoring a completed action now reclaims the XP and ₲ it earned — no more farming by re-completing.",
+      "Un-marking a habit reverses its reward too; the books always balance.",
+      "New daily upkeep: every open action costs a little threat each day, so a bloated backlog raises the pressure. Finish or cull to keep the settlement calm.",
+      "Fixed the phantom 'fortify overdue' on day one — your review clock now starts when your journey does.",
+      "The weekly fortification can be claimed once per weekend.",
+    ],
+    migrate: (all) => {
+      // Backfill audit fields on already-completed actions so restores reclaim cleanly.
+      // Old completed items have no recorded award; default to zero (no retroactive claw-back).
+      const items = (all.items || []).map((i) =>
+        i.done && i.awarded === undefined ? { ...i, awarded: { xp: 0, gtd: 0 }, claimAwarded: null } : i);
+      return { ...all, items };
     },
   },
 };
@@ -291,7 +306,7 @@ const rankTier = (level) => RANKS.filter((r) => level >= r.min).length; // 1..8,
 
 // ----- Threat (0–100), computed live from system state -----
 const FORTIFY_FLOOR_DAYS = 3;
-function threatBreakdown({ items, projects, habits, log, lastReview, lastTended, siegeBrokenAt }) {
+function threatBreakdown({ items, projects, habits, log, lastReview, lastTended, siegeBrokenAt, journeyStarted }) {
   const parts = [];
   const today = todayStr();
   const now = Date.now();
@@ -311,26 +326,29 @@ function threatBreakdown({ items, projects, habits, log, lastReview, lastTended,
   const stalled = active.filter((p) => items.filter((i) => i.projectId === p.id && i.type === "next" && !i.done && !isBlocked(i)).length === 0 && items.some((i) => i.projectId === p.id));
   if (stalled.length) parts.push({ key: "stalled", label: `${stalled.length} wall ${stalled.length === 1 ? "breach" : "breaches"}`, amt: stalled.length * 8 });
 
-  // overdue weekly review: 0 until day 7, then +3/day, cap +30
-  const sinceReview = lastReview ? daysBetween(lastReview, today) : 999;
+  // overdue weekly review: the clock starts at the LATER of last review or journey start,
+  // so a brand-new survivor has no phantom backlog. Grace of 7 days, then +3/day, cap +30.
+  const anchor = lastReview || (journeyStarted ? isoDate(new Date(journeyStarted)) : today);
+  const sinceReview = daysBetween(anchor, today);
   if (sinceReview > 7) {
     const amt = Math.min(30, (sinceReview - 7) * 3);
     parts.push({ key: "review", label: `fortify overdue ${sinceReview - 7}d`, amt });
-  } else if (!lastReview) {
-    parts.push({ key: "review", label: "settlement never fortified", amt: 12 });
   }
 
   // missed scheduled raids: +4 each
   const missed = items.filter((i) => i.type === "calendar" && !i.done && i.dueDate && i.dueDate < today);
   if (missed.length) parts.push({ key: "missed", label: `${missed.length} missed ${missed.length === 1 ? "raid" : "raids"}`, amt: missed.length * 4 });
 
-  // lapsed routines today: +1.5 each scheduled-but-undone (only counts after... we count today's undone)
+  // lapsed routines today: +1.5 each scheduled-but-undone
   const brokenToday = habits.filter((h) => isScheduled(h, today) && !log[h.id + "|" + today]).length;
   if (brokenToday) parts.push({ key: "habits", label: `${brokenToday} ${brokenToday === 1 ? "routine" : "routines"} unattended`, amt: brokenToday * 1.5 });
 
-  // slow drift: +1/day since last tended (mild entropy), cap +15
-  const driftDays = lastTended ? Math.max(0, daysBetween(isoDate(new Date(lastTended)), today)) : 0;
-  if (driftDays > 0) parts.push({ key: "drift", label: `${driftDays}d of entropy`, amt: Math.min(15, driftDays) });
+  // daily upkeep: every OPEN next action costs 0.1/day to "feed" — the backlog tax.
+  // Uncapped on purpose: hoarding tasks you never finish steadily raises the threat,
+  // pushing you to either complete or cull. Completing an action removes its share.
+  const openActions = items.filter((i) => i.type === "next" && !i.done).length;
+  const upkeep = openActions * 0.1;
+  if (upkeep > 0) parts.push({ key: "upkeep", label: `upkeep on ${openActions} open ${openActions === 1 ? "action" : "actions"}`, amt: upkeep });
 
   let raw = parts.reduce((s, p) => s + p.amt, 0);
 
@@ -797,7 +815,7 @@ export default function App() {
       const isNew = !savedMeta || typeof savedMeta.version !== "number";
       if (isNew) {
         // brand-new: stamp current version, open onboarding
-        const m = { version: APP_VERSION, name: "", createdAt: Date.now() };
+        const m = { version: APP_VERSION, name: "", createdAt: Date.now(), journeyStarted: Date.now() };
         setMeta(m); store.save(KEYS.meta, m);
         applyLoaded(loaded);
         setOnboarding(true);
@@ -809,7 +827,7 @@ export default function App() {
         store.save(KEYS.game, data.game);
         store.save(KEYS.horizons, data.horizons);
         store.save(KEYS.settings, data.settings);
-        const m = { ...savedMeta, version: APP_VERSION };
+        const m = { ...savedMeta, version: APP_VERSION, journeyStarted: savedMeta.journeyStarted || savedMeta.createdAt || Date.now() };
         setMeta(m); store.save(KEYS.meta, m);
         if (pending.length) setWhatsNew(pending);
       } else {
@@ -861,20 +879,23 @@ export default function App() {
     setToasts((t) => [...t, { id, msg }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2600);
   };
-  // award is frozen during siege except for the actions that break it
+  // award (or reclaim, with negative xp/gtd) — XP/₲ are clamped at 0 so a claw-back
+  // can never drive a balance negative. XP is permanent and accrues even in siege;
+  // the ₲ economy is frozen in siege (positive grants only).
   const award = (xp, gtd, msg, opts = {}) => {
     setGame((g) => {
       const siegeFrozen = g.inSiege && !opts.duringSiege;
       const ng = { ...g, lastTended: Date.now() };
       const beforeLvl = levelFromXP(g.xp);
-      ng.xp = g.xp + (xp || 0); // XP always accrues (permanent track), even in siege
-      if (!siegeFrozen) ng.gtd = g.gtd + (gtd || 0); // economy frozen in siege
+      ng.xp = Math.max(0, g.xp + (xp || 0));
+      // ₲ moves on grants always; on reclaims always (you can lose ₲ in siege, just not earn it)
+      if (!siegeFrozen || (gtd || 0) < 0) ng.gtd = Math.max(0, g.gtd + (gtd || 0));
       store.save(KEYS.game, ng);
       const afterLvl = levelFromXP(ng.xp);
       if (msg) {
         const bits = [];
-        if (xp) bits.push(`+${xp} XP`);
-        if (gtd && !siegeFrozen) bits.push(`+${gtd} ₲`);
+        if (xp) bits.push(`${xp > 0 ? "+" : ""}${xp} XP`);
+        if (gtd && (!siegeFrozen || gtd < 0)) bits.push(`${gtd > 0 ? "+" : ""}${gtd} ₲`);
         pushToast(`${msg}${bits.length ? "  " + bits.join("  ") : ""}`);
       }
       if (afterLvl > beforeLvl) setTimeout(() => pushToast(`◆ Rank up — Level ${afterLvl}, ${rankFor(afterLvl)}`), 700);
@@ -896,29 +917,47 @@ export default function App() {
     const it = items.find((i) => i.id === id);
     if (!it) return;
     const completing = !it.done;
-    let next = items.map((i) => i.id === id ? { ...i, done: !i.done, completedAt: !i.done ? Date.now() : null } : i);
-    // recurring next-action: completing it spawns the next occurrence
-    if (completing && it.recur) {
-      next = [{
-        ...it, id: uid(), done: false, completedAt: null, createdAt: Date.now(),
-        dueDate: it.dueDate ? nextRecurDate(it.dueDate, it.recur) : undefined,
-      }, ...next];
-    }
-    saveItems(next);
 
     if (completing) {
+      // compute and RECORD exactly what we grant, so a future restore reclaims the same amount
       const w = actionWeight(it, items);
       const tier = toneTier(w);
-      award(actionXP(w), actionGTD(w), `${TONE_META[tier].label} down`);
-      // project claim: was this the last open action in its project?
+      const ax = actionXP(w), ag = actionGTD(w);
+
+      // project-claim detection on the post-completion list
+      let claim = null;
       if (it.projectId) {
-        const remaining = next.filter((i) => i.projectId === it.projectId && i.type === "next" && !i.done);
-        if (remaining.length === 0) {
+        const remainingAfter = items.filter((i) => i.projectId === it.projectId && i.type === "next" && !i.done && i.id !== id).length;
+        if (remainingAfter === 0) {
           const rooms = items.filter((i) => i.projectId === it.projectId && i.type === "next").length || 1;
-          const proj = projects.find((p) => p.id === it.projectId);
-          setTimeout(() => award(25 * Math.max(1, Math.round(rooms / 2)), 15 * rooms, `Structure claimed: ${proj ? proj.title : "building"}`), 500);
+          claim = { xp: 25 * Math.max(1, Math.round(rooms / 2)), gtd: 15 * rooms, proj: it.projectId };
         }
       }
+
+      const patch = { done: true, completedAt: Date.now(), awarded: { xp: ax, gtd: ag }, claimAwarded: claim };
+      let next = items.map((i) => i.id === id ? { ...i, ...patch } : i);
+      if (it.recur) {
+        // the respawned occurrence starts fresh with no award history
+        const { awarded, claimAwarded, ...seed } = it;
+        next = [{ ...seed, id: uid(), done: false, completedAt: null, createdAt: Date.now(),
+          dueDate: it.dueDate ? nextRecurDate(it.dueDate, it.recur) : undefined }, ...next];
+      }
+      saveItems(next);
+
+      award(ax, ag, `${TONE_META[tier].label} down`);
+      if (claim) {
+        const proj = projects.find((p) => p.id === claim.proj);
+        setTimeout(() => award(claim.xp, claim.gtd, `Structure claimed: ${proj ? proj.title : "building"}`), 500);
+      }
+    } else {
+      // RESTORE: reclaim exactly what was granted (recorded on the item), then clear the record
+      const back = it.awarded || { xp: 0, gtd: 0 };
+      const claimBack = it.claimAwarded || null;
+      const patch = { done: false, completedAt: null, awarded: null, claimAwarded: null };
+      saveItems(items.map((i) => i.id === id ? { ...i, ...patch } : i));
+      const totXp = (back.xp || 0) + (claimBack ? claimBack.xp : 0);
+      const totGtd = (back.gtd || 0) + (claimBack ? claimBack.gtd : 0);
+      if (totXp || totGtd) award(-totXp, -totGtd, "Restored — reward reclaimed");
     }
   };
 
@@ -956,7 +995,7 @@ export default function App() {
     if (!title.trim()) return;
     saveItems([{ id: uid(), title: title.trim(), notes: "", type: "next", context, projectId: pid, createdAt: Date.now(), done: false, energy: "medium", time: "15m" }, ...items]);
   };
-  const restoreItem = (id) => updateItem(id, { done: false, completedAt: null });
+  const restoreItem = (id) => { const it = items.find((i) => i.id === id); if (it && it.done) toggleDone(id); };
   const reactivateProject = (id) => updateProject(id, { status: "active" });
 
   // ---- area ops (Horizon 2) ----
@@ -992,29 +1031,52 @@ export default function App() {
   const toggleLog = (hid, ds) => {
     const k = hid + "|" + ds;
     const nl = { ...log };
-    const wasDone = !!nl[k];
-    if (wasDone) delete nl[k]; else nl[k] = true;
-    saveLog(nl);
-    if (!wasDone && ds === todayStr()) {
-      const h = habits.find((x) => x.id === hid);
-      const streak = h ? habitStreak(h, nl) : 0;
-      award(5, 3, "Routine held");
-      if ([7, 30, 100].includes(streak)) setTimeout(() => award(streak, streak, `◆ ${streak}-day streak — the settlement endures`), 500);
+    const prev = nl[k]; // truthy = done; may be an object with recorded award
+    if (prev) {
+      // un-toggling: reclaim exactly what this entry granted
+      delete nl[k];
+      saveLog(nl);
+      const rec = (typeof prev === "object" && prev) ? prev : { xp: 5, gtd: 3 }; // legacy entries default
+      const xp = (rec.xp || 0), gtd = (rec.gtd || 0);
+      if (xp || gtd) award(-xp, -gtd, "Routine un-marked — reward reclaimed");
+    } else {
+      // toggling on — only today's routine earns (no backdate farming)
+      const earns = ds === todayStr();
+      if (earns) {
+        const h = habits.find((x) => x.id === hid);
+        const streak = h ? habitStreak(h, { ...nl, [k]: true }) : 0;
+        const milestone = [7, 30, 100].includes(streak) ? streak : 0;
+        const xp = 5 + milestone, gtd = 3 + milestone;
+        nl[k] = { at: Date.now(), xp, gtd };
+        saveLog(nl);
+        award(5, 3, "Routine held");
+        if (milestone) setTimeout(() => award(milestone, milestone, `◆ ${milestone}-day streak — the settlement endures`), 500);
+      } else {
+        nl[k] = { at: Date.now(), xp: 0, gtd: 0 };
+        saveLog(nl);
+      }
     }
   };
 
   // ---- weekly review payday (the boss) + siege break ----
-  // A fortification can only be raised on the weekend (Fri/Sat/Sun) and at most once a day.
+  // Fortification can be raised only on the weekend (Fri/Sat/Sun) and only ONCE per
+  // weekend window — completing it Friday locks it through Sunday.
   const reviewAllowed = () => {
-    const dow = new Date().getDay(); // 0 Sun .. 6 Sat
+    const now = new Date();
+    const dow = now.getDay(); // 0 Sun .. 6 Sat
     const isWeekend = dow === 5 || dow === 6 || dow === 0;
-    const alreadyToday = settings.lastReview === todayStr();
-    return { isWeekend, alreadyToday, ok: isWeekend && !alreadyToday };
+    // Friday that anchors the current weekend window:
+    //   Fri(5)→today, Sat(6)→yesterday, Sun(0)→2 days ago.
+    const back = dow === 5 ? 0 : dow === 6 ? 1 : dow === 0 ? 2 : 0;
+    const windowStart = new Date(now); windowStart.setDate(now.getDate() - back);
+    const windowStartStr = isoDate(windowStart);
+    const doneThisWeekend = !!settings.lastReview && isWeekend && settings.lastReview >= windowStartStr;
+    return { isWeekend, doneThisWeekend, ok: isWeekend && !doneThisWeekend };
   };
   const completeReview = () => {
     const gate = reviewAllowed();
     if (!gate.ok) {
-      pushToast(gate.alreadyToday ? "Already fortified today. Rest." : "The fortification can only be raised on the weekend.");
+      pushToast(gate.doneThisWeekend ? "Already fortified this weekend. The walls hold." : "The fortification can only be raised on the weekend.");
       return;
     }
     const today = todayStr();
@@ -1104,8 +1166,8 @@ export default function App() {
 
   // ---- live threat (computed, never stored as a free number) ----
   const threat = useMemo(() => threatBreakdown({
-    items, projects, habits, log, lastReview: settings.lastReview, lastTended: game.lastTended, siegeBrokenAt: game.siegeBrokenAt,
-  }), [items, projects, habits, log, settings.lastReview, game.lastTended, game.siegeBrokenAt]);
+    items, projects, habits, log, lastReview: settings.lastReview, lastTended: game.lastTended, siegeBrokenAt: game.siegeBrokenAt, journeyStarted: meta.journeyStarted,
+  }), [items, projects, habits, log, settings.lastReview, game.lastTended, game.siegeBrokenAt, meta.journeyStarted]);
   const band = threatBand(threat.value);
 
   // siege latch: enter at 100, exit handled by review or dropping below 70
@@ -1791,10 +1853,10 @@ function ReviewView({ inbox, nexts, waiting, stalled, somedays, setView, setting
           <span style={{ fontSize: 13, color: "var(--ink2)" }}>Fortification crews only muster on the <b>weekend</b> (Fri–Sun). You can still walk the checklist now, but the settlement can't be fortified until then.</span>
         </div>
       )}
-      {gate.isWeekend && gate.alreadyToday && (
+      {gate.isWeekend && gate.doneThisWeekend && (
         <div className="card" style={{ padding: 13, marginBottom: 14, display: "flex", gap: 9, alignItems: "center" }}>
           <Check size={16} color="var(--pine)" />
-          <span style={{ fontSize: 13, color: "var(--ink2)" }}>Already fortified today. The walls hold — come back next weekend.</span>
+          <span style={{ fontSize: 13, color: "var(--ink2)" }}>Already fortified this weekend. The walls hold — come back next weekend.</span>
         </div>
       )}
       <div className="card" style={{ padding: 16 }}>
@@ -1820,7 +1882,7 @@ function ReviewView({ inbox, nexts, waiting, stalled, somedays, setView, setting
           onClick={complete}>
           <Shield size={16} /> {
             !gate.isWeekend ? "Available on the weekend"
-            : gate.alreadyToday ? "Fortified — back next weekend"
+            : gate.doneThisWeekend ? "Fortified — back next weekend"
             : done < all.length ? `${done}/${all.length} — hold the line`
             : "Fortify the settlement  ·  +200 XP +100 ₲"
           }
