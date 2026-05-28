@@ -6,6 +6,8 @@ import {
   AlertTriangle, Sun, ListChecks, Send, Clipboard, Filter, Pencil, Settings2,
   Archive, Lock, Link2, Compass, Mountain, Target, Radar, ShoppingBag, Skull, Crosshair, Shield, Menu
 } from "lucide-react";
+import { syncEnabled } from "./supabaseClient.js";
+import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave } from "./cloudSync.js";
 
 /* ============================================================================
    STORAGE SEAM
@@ -71,7 +73,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 7;
+const APP_VERSION = 8;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -141,6 +143,14 @@ const MIGRATIONS = {
       delete game.ownedGear;
       return { ...all, game };
     },
+  },
+  8: {
+    notes: [
+      "Cloud sync is here — sign in with Google in Settings to keep your settlement in step across devices.",
+      "Sign-in is optional; the app still works fully offline and on this device alone.",
+      "When a newer copy is found on another device, Clearmind asks before replacing — and lets you export the old copy first.",
+    ],
+    // additive: sync stores the same state blob; meta.updatedAt is backfilled lazily on first change.
   },
 };
 
@@ -936,6 +946,10 @@ export default function App() {
   const [expanded, setExpanded] = useState({});
   const [exportOpen, setExportOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [session, setSession] = useState(null);          // Supabase auth session or null
+  const [syncBusy, setSyncBusy] = useState(false);       // a cloud op is in flight
+  const [lastCloudSync, setLastCloudSync] = useState(null); // timestamp of last successful cloud save/load
+  const [pendingCloud, setPendingCloud] = useState(null);   // {blob, at} older copy offered for export before overwrite
   const [editId, setEditId] = useState(null);
   const [ctxMgrOpen, setCtxMgrOpen] = useState(false);
   const [openArea, setOpenArea] = useState(null);
@@ -978,7 +992,7 @@ export default function App() {
         store.save(KEYS.game, data.game);
         store.save(KEYS.horizons, data.horizons);
         store.save(KEYS.settings, data.settings);
-        const m = { ...savedMeta, version: APP_VERSION, journeyStarted: savedMeta.journeyStarted || savedMeta.createdAt || Date.now() };
+        const m = { ...savedMeta, version: APP_VERSION, journeyStarted: savedMeta.journeyStarted || savedMeta.createdAt || Date.now(), updatedAt: savedMeta.updatedAt || savedMeta.journeyStarted || savedMeta.createdAt || Date.now() };
         setMeta(m); store.save(KEYS.meta, m);
         if (pending.length) setWhatsNew(pending);
       } else {
@@ -991,11 +1005,126 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // helper to push a loaded/migrated bundle into state
+  // ---- auth: pick up existing session, then listen for sign-in/out ----
+  useEffect(() => {
+    if (!syncEnabled) return;
+    let unsub = () => {};
+    (async () => {
+      const sess = await getSession();
+      if (sess) { setSession(sess); reconcileOnSignIn(sess); }
+      unsub = onAuthChange((s) => {
+        setSession((prev) => {
+          // only reconcile on a real new sign-in (prev null → session present)
+          if (s && !prev) reconcileOnSignIn(s);
+          return s;
+        });
+      });
+    })();
+    return () => unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // push a loaded/migrated bundle into state
   function applyLoaded(d) {
     setItems(d.items); setProjects(d.projects); setHabits(d.habits); setLog(d.log);
     setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
   }
+
+  // ---- cloud sync engine (no-ops cleanly when sync isn't configured) ----
+  // Bundle the entire app state into one blob — same shape as export, carrying version+meta.
+  const snapshot = () => ({
+    version: APP_VERSION, items, projects, habits, log, settings, areas, horizons, game, meta,
+  });
+  // Write a cloud blob into both React state and localStorage so the local cache matches cloud.
+  // Runs migrations if the cloud copy predates this client (e.g. another device on an older app).
+  const applyBlob = (blob) => {
+    let b = {
+      items: blob.items || [], projects: blob.projects || [], habits: blob.habits || [],
+      log: blob.log || {}, settings: blob.settings || { contexts: DEFAULT_CONTEXTS, lastReview: null },
+      areas: blob.areas || [], horizons: blob.horizons || { goals: [], vision: [], purpose: [] },
+      game: blob.game || game,
+    };
+    const fromV = typeof blob.version === "number" ? blob.version : 0;
+    if (fromV < APP_VERSION) b = runMigrations(b, fromV).data;
+    saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits); saveLog(b.log);
+    saveSettings(b.settings); saveAreas(b.areas); saveHorizons(b.horizons); saveGame(b.game);
+    if (blob.meta) saveMeta({ ...blob.meta, version: APP_VERSION });
+  };
+  // Push current state to the cloud — called after key actions, only when signed in.
+  const pushCloud = async () => {
+    if (!syncEnabled || !session) return;
+    setSyncBusy(true);
+    const ok = await cloudSave(session.user.id, snapshot());
+    if (ok) setLastCloudSync(Date.now());
+    setSyncBusy(false);
+  };
+  // Reconcile local vs cloud on sign-in using newest-wins. Before overwriting the OLDER
+  // copy, stash it so the user can export it as a safety net.
+  const reconcileOnSignIn = async (sess) => {
+    if (!syncEnabled || !sess) return;
+    setSyncBusy(true);
+    const cloud = await cloudLoad(sess.user.id);
+    const localAt = meta.updatedAt || 0;
+    const cloudAt = cloud ? Date.parse(cloud.updated_at) : 0;
+    if (!cloud) {
+      // first time on this account → seed cloud from local
+      await cloudSave(sess.user.id, snapshot());
+      setLastCloudSync(Date.now());
+    } else if (cloudAt > localAt) {
+      // cloud is newer → it wins; offer the local copy for export first
+      setPendingCloud({ blob: snapshot(), at: localAt, replaceWith: cloud.data, newAt: cloudAt, dir: "cloud-wins" });
+    } else if (localAt > cloudAt) {
+      // local is newer → push it up (offer the cloud copy for export first)
+      setPendingCloud({ blob: cloud.data, at: cloudAt, replaceWith: null, newAt: localAt, dir: "local-wins" });
+    } else {
+      setLastCloudSync(cloudAt || Date.now());
+    }
+    setSyncBusy(false);
+  };
+  // Resolve the pending reconcile once the user has decided about exporting the old copy.
+  const resolvePending = async () => {
+    if (!pendingCloud || !session) { setPendingCloud(null); return; }
+    setSyncBusy(true);
+    if (pendingCloud.dir === "cloud-wins") {
+      applyBlob(pendingCloud.replaceWith);
+      setLastCloudSync(pendingCloud.newAt);
+    } else {
+      await cloudSave(session.user.id, snapshot());
+      setLastCloudSync(Date.now());
+    }
+    setPendingCloud(null);
+    setSyncBusy(false);
+  };
+  // Download the copy that's about to be replaced, as a safety net, before newest-wins overwrites it.
+  const downloadOldCache = (pending) => {
+    try {
+      const blob = pending.dir === "cloud-wins" ? pending.blob : pending.blob; // the older copy in both dirs
+      const text = JSON.stringify(blob, null, 2);
+      const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `clearmind-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click(); URL.revokeObjectURL(url);
+    } catch (e) { pushToast("Could not export the old copy."); }
+  };
+  const doSignIn = () => signInWithGoogle();
+  const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); pushToast("Signed out — your data stays on this device."); };
+
+  // ---- mark local modifications + debounced cloud push on any data change ----
+  const syncTimer = useRef(null);
+  const firstChange = useRef(true);
+  useEffect(() => {
+    if (!loaded) return;
+    if (firstChange.current) { firstChange.current = false; return; } // ignore initial load
+    const ts = Date.now();
+    const stamped = { ...meta, updatedAt: ts };
+    setMeta(stamped); store.save(KEYS.meta, stamped);
+    if (syncEnabled && session) {
+      if (syncTimer.current) clearTimeout(syncTimer.current);
+      syncTimer.current = setTimeout(() => { pushCloud(); }, 3000);
+    }
+    return () => { if (syncTimer.current) clearTimeout(syncTimer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, projects, habits, log, settings, areas, horizons, game]);
 
   // ---- persisted setters ----
   const saveItems = (v) => { setItems(v); store.save(KEYS.items, v); };
@@ -1476,7 +1605,10 @@ export default function App() {
       )}
       {exportOpen && <ExportModal text={exportData()} onClose={() => setExportOpen(false)} onImport={importData} />}
       {settingsOpen && <SettingsModal meta={meta} onSaveName={(nm) => saveMeta({ ...meta, name: nm })}
-        onOpenExport={() => { setSettingsOpen(false); setExportOpen(true); }} onClose={() => setSettingsOpen(false)} />}
+        onOpenExport={() => { setSettingsOpen(false); setExportOpen(true); }} onClose={() => setSettingsOpen(false)}
+        syncEnabled={syncEnabled} session={session} syncBusy={syncBusy} lastCloudSync={lastCloudSync}
+        onSignIn={doSignIn} onSignOut={doSignOut} />}
+      {pendingCloud && <ReconcileModal pending={pendingCloud} onExportOld={() => downloadOldCache(pendingCloud)} onContinue={resolvePending} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
       {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
@@ -2704,9 +2836,11 @@ function WhatsNewModal({ name, entries, onClose }) {
   );
 }
 
-function SettingsModal({ meta, onSaveName, onOpenExport, onClose }) {
+function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, session, syncBusy, lastCloudSync, onSignIn, onSignOut }) {
   const [name, setName] = useState(meta.name || "");
   const started = meta.journeyStarted ? new Date(meta.journeyStarted).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) : null;
+  const syncedStr = lastCloudSync ? new Date(lastCloudSync).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
+  const deviceStr = meta.updatedAt ? new Date(meta.updatedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
   return (
     <div className="overlay" onClick={onClose}>
       <div className="card rise" style={{ width: 480, maxWidth: "100%", padding: 22 }} onClick={(e) => e.stopPropagation()}>
@@ -2723,15 +2857,42 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose }) {
         </div>
         {started && <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 16 }}>Surviving since {started}</div>}
 
-        {/* Account — placeholder until Supabase sign-in lands */}
-        <div className="subq" style={{ marginBottom: 7 }}>ACCOUNT</div>
-        <div className="card" style={{ padding: 12, marginBottom: 16, display: "flex", alignItems: "center", gap: 10, background: "var(--paper2)" }}>
-          <Lock size={15} color="var(--muted)" />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 13 }}>Cloud sync &amp; sign-in</div>
-            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>Coming soon — sync progress across devices</div>
+        {/* Account / cloud sync */}
+        <div className="subq" style={{ marginBottom: 7 }}>ACCOUNT &amp; SYNC</div>
+        {!syncEnabled ? (
+          <div className="card" style={{ padding: 12, marginBottom: 16, display: "flex", alignItems: "center", gap: 10, background: "var(--paper2)" }}>
+            <Lock size={15} color="var(--muted)" />
+            <div style={{ fontSize: 12.5, color: "var(--ink2)" }}>Cloud sync isn't configured in this build.</div>
           </div>
-        </div>
+        ) : session ? (
+          <div className="card" style={{ padding: 13, marginBottom: 16, background: "var(--paper2)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+              <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                <Check size={16} color="#fbf9f4" />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>Synced{syncBusy ? " · saving…" : ""}</div>
+                <div className="mono" style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {session.user?.email}
+                </div>
+              </div>
+              <button className="btn btn-sm btn-ghost" onClick={onSignOut}>Sign out</button>
+            </div>
+            <div className="mono" style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.6 }}>
+              {syncedStr && <>Cloud updated {syncedStr}<br /></>}
+              {deviceStr && <>This device modified since {deviceStr}</>}
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginBottom: 16 }}>
+            <button className="btn btn-accent" style={{ width: "100%" }} onClick={onSignIn}>
+              <Link2 size={15} /> Sign in with Google to sync
+            </button>
+            <div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+              Optional. Sign in to sync progress across your devices. Your data stays on this device either way.
+            </div>
+          </div>
+        )}
 
         {/* Data */}
         <div className="subq" style={{ marginBottom: 7 }}>DATA</div>
@@ -2739,7 +2900,34 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose }) {
           <Download size={14} /> Export / Import your data
         </button>
         <div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
-          Your data lives on this device. Export regularly as a backup, and to move between devices until cloud sync arrives.
+          Export anytime as a backup or to move data between devices manually.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReconcileModal({ pending, onExportOld, onContinue }) {
+  const cloudWins = pending.dir === "cloud-wins";
+  const oldDate = pending.at ? new Date(pending.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "an earlier time";
+  const newDate = pending.newAt ? new Date(pending.newAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "now";
+  return (
+    <div className="overlay" style={{ alignItems: "center" }}>
+      <div className="card rise" style={{ width: 460, maxWidth: "100%", padding: 24 }}>
+        <div className="serif" style={{ fontSize: 20, marginBottom: 8 }}>Sync — newer copy found</div>
+        <p style={{ fontSize: 13.5, color: "var(--ink2)", lineHeight: 1.55, marginTop: 0 }}>
+          {cloudWins
+            ? <>Your account has a <b>newer</b> copy in the cloud (updated {newDate}) than what's on this device (from {oldDate}). Keeping the newer one will replace this device's copy.</>
+            : <>This device has a <b>newer</b> copy (modified {newDate}) than your account's cloud copy (from {oldDate}). Continuing will update the cloud with this device's version.</>}
+        </p>
+        <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+          Before that, you can download the copy that's about to be replaced, just in case.
+        </p>
+        <div style={{ display: "flex", gap: 8, marginTop: 18, flexWrap: "wrap" }}>
+          <button className="btn btn-sm" onClick={onExportOld}><Download size={14} /> Export the old copy</button>
+          <button className="btn btn-accent btn-sm" style={{ marginLeft: "auto" }} onClick={onContinue}>
+            <Check size={14} /> {cloudWins ? "Use the newer cloud copy" : "Update cloud with this device"}
+          </button>
         </div>
       </div>
     </div>

@@ -112,6 +112,34 @@ When someone opens the live URL in Chrome or Edge:
 
 ---
 
+## Cloud sync (Supabase) — optional sign-in
+
+Clearmind can sync your data across devices via Supabase. This is **optional** — the
+app works fully offline and per-device without it; signing in just keeps multiple
+devices in step.
+
+Configuration lives in **`.env`** at the project root:
+
+```
+VITE_SUPABASE_URL=...        # your Supabase project URL
+VITE_SUPABASE_ANON_KEY=...   # the anon/public key (safe to commit & expose)
+```
+
+The anon key is **public by design** — it is meant to ship in client code. Data is
+protected by Row-Level Security on the database, not by hiding this key. **Never** put
+the `service_role` / secret key here. If `.env` is missing, the app simply runs without
+sync (no sign-in option appears) — it never breaks.
+
+How sync behaves: you sign in with Google from **Settings → Account & Sync**. Your whole
+state is saved to the cloud a few seconds after each change. On sign-in, Clearmind uses
+"newest wins" — if another device has a newer copy, it asks before replacing this device's
+data and lets you export the old copy first. Sign-in is gated to Google accounts you've
+added as test users in the Google Cloud consent screen (ideal for a small private group).
+
+If sign-in seems to work but lands you logged-out, the cause is almost always a redirect
+URL mismatch: confirm `https://<username>.github.io/<repo>/` is listed under Supabase →
+Authentication → URL Configuration (both Site URL and Redirect URLs).
+
 ## Updating the app later
 
 Push changes to `main`; the Action rebuilds and redeploys. To force installed
