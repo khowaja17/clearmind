@@ -71,7 +71,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 5;
+const APP_VERSION = 6;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -109,6 +109,15 @@ const MIGRATIONS = {
       return { ...all, items };
     },
   },
+  6: {
+    notes: [
+      "New Settings menu — your name, data export/import, and a home for cloud sign-in soon.",
+      "Projects now have a settings button; completing or deleting takes a deliberate tap (no more accidents).",
+      "More context presets — Medical School, Healthcare, Engineering, Student, Creative, and Research.",
+      "Link a habit to a Purpose, so a daily routine carries the reason behind it.",
+    ],
+    // purely additive (name in meta, purposeId on habits, project menu) — no data reshape needed
+  },
 };
 
 // Runs every migration with introducedVersion in (fromVersion, APP_VERSION].
@@ -137,7 +146,16 @@ const todayStr = () => isoDate(new Date());
 const DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const DEFAULT_CONTEXTS = ["@computer", "@phone", "@errands", "@home", "@office", "@anywhere", "@agenda"];
-const RESEARCH_CONTEXTS = ["@lab", "@sim", "@writing", "@reading", "@code", "@analysis", "@advisor"];
+// Named context presets by domain — pick the one that fits your life and add it in one tap.
+const CONTEXT_PRESETS = {
+  Research: ["@lab", "@sim", "@writing", "@reading", "@code", "@analysis", "@advisor"],
+  "Medical School": ["@lectures", "@anki", "@wards", "@rounds", "@study-group", "@clinic", "@exam-prep"],
+  Healthcare: ["@charting", "@patients", "@rounds", "@on-call", "@pharmacy", "@admin", "@handoff"],
+  Engineering: ["@cad", "@bench", "@code", "@review", "@field", "@vendor", "@docs"],
+  Student: ["@class", "@library", "@group", "@email", "@reading", "@lab", "@office-hours"],
+  Creative: ["@studio", "@drafting", "@editing", "@research", "@outreach", "@admin"],
+};
+const RESEARCH_CONTEXTS = CONTEXT_PRESETS.Research; // kept for backward-compat references
 const ENERGY = ["low", "medium", "high"];
 const TIMES = ["5m", "15m", "30m", "1h", "2h+"];
 const RECUR = [
@@ -747,8 +765,7 @@ function ContextManager({ contexts, onClose, onSave }) {
   const [nc, setNc] = useState("");
   const norm = (s) => { let t = s.trim().replace(/\s+/g, "-").toLowerCase(); if (t && !t.startsWith("@")) t = "@" + t; return t; };
   const add = () => { const t = norm(nc); if (t && !list.includes(t)) setList([...list, t]); setNc(""); };
-  const addPreset = () => setList([...new Set([...list, ...RESEARCH_CONTEXTS])]);
-  const missing = RESEARCH_CONTEXTS.filter((c) => !list.includes(c));
+  const addPreset = (ctxs) => setList((l) => [...new Set([...l, ...ctxs])]);
   return (
     <div className="overlay" onClick={onClose}>
       <div className="card rise" style={{ width: 480, maxWidth: "100%", padding: 22 }} onClick={(e) => e.stopPropagation()}>
@@ -764,11 +781,19 @@ function ContextManager({ contexts, onClose, onSave }) {
             </span>
           ))}
         </div>
-        {missing.length > 0 && (
-          <button className="btn btn-sm" style={{ marginBottom: 12 }} onClick={addPreset}>
-            <Plus size={13} /> Add research preset ({missing.join(" ")})
-          </button>
-        )}
+        <div className="subq" style={{ marginBottom: 7 }}>PRESETS — add a domain's contexts in one tap</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+          {Object.entries(CONTEXT_PRESETS).map(([name, ctxs]) => {
+            const missing = ctxs.filter((c) => !list.includes(c));
+            const fully = missing.length === 0;
+            return (
+              <button key={name} className="btn btn-sm" disabled={fully} style={{ opacity: fully ? .5 : 1 }}
+                title={fully ? "already added" : ctxs.join(" ")} onClick={() => addPreset(ctxs)}>
+                <Plus size={12} /> {name}{fully ? " ✓" : ""}
+              </button>
+            );
+          })}
+        </div>
         <div style={{ display: "flex", gap: 8 }}>
           <input className="input" placeholder="Add a context…" value={nc} onChange={(e) => setNc(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
           <button className="btn" onClick={add}><Plus size={15} /></button>
@@ -827,6 +852,7 @@ export default function App() {
   const [ctxFilter, setCtxFilter] = useState("all");
   const [expanded, setExpanded] = useState({});
   const [exportOpen, setExportOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [editId, setEditId] = useState(null);
   const [ctxMgrOpen, setCtxMgrOpen] = useState(false);
   const [openArea, setOpenArea] = useState(null);
@@ -1070,6 +1096,7 @@ export default function App() {
     Object.keys(nl).forEach((k) => { if (k.startsWith(id + "|")) delete nl[k]; });
     saveLog(nl);
   };
+  const updateHabit = (id, patch) => saveHabits(habits.map((h) => h.id === id ? { ...h, ...patch } : h));
   const toggleLog = (hid, ds) => {
     const k = hid + "|" + ds;
     const nl = { ...log };
@@ -1292,8 +1319,8 @@ export default function App() {
           })}
         </nav>
         <div style={{ marginTop: "auto", paddingTop: 14 }}>
-          <button className="btn btn-sm" style={{ width: "100%" }} onClick={() => setExportOpen(true)}>
-            <Download size={14} /> Export / Import
+          <button className="btn btn-sm" style={{ width: "100%" }} onClick={() => { setSettingsOpen(true); setDrawerOpen(false); }}>
+            <Settings2 size={14} /> Settings
           </button>
           <InstallButton />
           {daysSinceReview !== null && daysSinceReview >= 7 && (
@@ -1337,7 +1364,7 @@ export default function App() {
           {view === "calendar" && <CalendarView {...{ scheduled, toggleDone, deleteItem, onEdit: setEditId }} />}
           {view === "someday" && <SomedayView {...{ somedays, updateItem, deleteItem, onEdit: setEditId }} />}
           {view === "reference" && <ReferenceView {...{ refs, deleteItem, updateItem, onEdit: setEditId }} />}
-          {view === "habits" && <HabitsView {...{ habits, log, toggleLog, addHabit, deleteHabit }} />}
+          {view === "habits" && <HabitsView {...{ habits, log, toggleLog, addHabit, deleteHabit, updateHabit, purposes: horizons.purpose || [], setView }} />}
           {view === "review" && <ReviewView {...{ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, siege: game.inSiege, gate: reviewAllowed() }} />}
           {view === "archive" && <ArchiveView {...{ completedItems, completedProjects, projName, restoreItem, deleteItem, reactivateProject, deleteProject }} />}
           {view === "areas" && <AreasView {...{ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit: setEditId, horizons, setView }} />}
@@ -1364,6 +1391,8 @@ export default function App() {
           onSave={(list) => { saveSettings({ ...settings, contexts: list }); setCtxMgrOpen(false); }} />
       )}
       {exportOpen && <ExportModal text={exportData()} onClose={() => setExportOpen(false)} onImport={importData} />}
+      {settingsOpen && <SettingsModal meta={meta} onSaveName={(nm) => saveMeta({ ...meta, name: nm })}
+        onOpenExport={() => { setSettingsOpen(false); setExportOpen(true); }} onClose={() => setSettingsOpen(false)} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
       {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
@@ -1538,6 +1567,8 @@ function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, p
 
 function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit, areas, assignProjectArea }) {
   const [np, setNp] = useState("");
+  const [menuFor, setMenuFor] = useState(null); // project id whose settings menu is open
+  const [confirmDel, setConfirmDel] = useState(null); // project id pending delete confirm
   const areaName = (id) => areas.find((a) => a.id === id)?.title;
   return (
     <div className="stagger">
@@ -1575,8 +1606,34 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
                     {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
                   </select>
                 )}
-                <button className="btn btn-sm btn-danger" onClick={() => deleteProject(p.id)}><Trash2 size={13} /></button>
-                <button className="btn btn-sm" onClick={() => updateProject(p.id, { status: "complete" })}><Check size={13} /> Done</button>
+                <div style={{ position: "relative" }}>
+                  <button className="btn btn-sm btn-ghost" title="Project settings"
+                    onClick={() => { setMenuFor(menuFor === p.id ? null : p.id); setConfirmDel(null); }}>
+                    <Settings2 size={14} />
+                  </button>
+                  {menuFor === p.id && (
+                    <>
+                      <div style={{ position: "fixed", inset: 0, zIndex: 30 }} onClick={() => { setMenuFor(null); setConfirmDel(null); }} />
+                      <div className="card rise" style={{ position: "absolute", right: 0, top: "110%", zIndex: 31, width: 196, padding: 6, boxShadow: "0 8px 24px rgba(0,0,0,.16)" }}>
+                        <button className="btn btn-ghost btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}
+                          onClick={() => { updateProject(p.id, { status: "complete" }); setMenuFor(null); }}>
+                          <Check size={14} /> Mark complete
+                        </button>
+                        {confirmDel === p.id ? (
+                          <button className="btn btn-sm btn-clay" style={{ width: "100%", justifyContent: "flex-start", marginTop: 4 }}
+                            onClick={() => { deleteProject(p.id); setMenuFor(null); setConfirmDel(null); }}>
+                            <Trash2 size={14} /> Tap again to delete
+                          </button>
+                        ) : (
+                          <button className="btn btn-ghost btn-sm btn-danger" style={{ width: "100%", justifyContent: "flex-start", marginTop: 4 }}
+                            onClick={() => setConfirmDel(p.id)}>
+                            <Trash2 size={14} /> Delete project…
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
               {open && <ProjectBody p={p} acts={acts} addActionToProject={addActionToProject} toggleDone={toggleDone}
                 updateItem={updateItem} isBlocked={isBlocked} allItems={allItems} contexts={contexts} onEdit={onEdit} />}
@@ -1796,10 +1853,12 @@ function ReferenceView({ refs, deleteItem, onEdit }) {
   );
 }
 
-function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit }) {
+function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit, updateHabit, purposes, setView }) {
   const [name, setName] = useState("");
   const [cadence, setCadence] = useState("daily");
   const [days, setDays] = useState([1, 2, 3, 4, 5]);
+  const [linkFor, setLinkFor] = useState(null); // habit id whose purpose picker is open
+  const purposeText = (id) => (purposes.find((p) => p.id === id) || {}).text;
   const last14 = useMemo(() => {
     const arr = [];
     const d = new Date();
@@ -1809,7 +1868,7 @@ function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit }) {
   const submit = () => { addHabit(name, cadence, cadence === "custom" ? days : []); setName(""); };
   return (
     <div className="stagger">
-      <SectionTitle sub="Build consistency. Tap a day to mark it done; streaks reward momentum.">Habits <span className="subq">DAILY ROUTINES</span></SectionTitle>
+      <SectionTitle sub="Build consistency. Tap a day to mark it done; streaks reward momentum. Link a routine to your Purpose to remember why it matters.">Habits <span className="subq">DAILY ROUTINES</span></SectionTitle>
 
       <div className="card" style={{ padding: 14, marginBottom: 18 }}>
         <div style={{ display: "flex", gap: 9, flexWrap: "wrap", alignItems: "center" }}>
@@ -1832,7 +1891,9 @@ function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit }) {
       </div>
 
       {habits.length === 0 ? <Empty icon={Repeat} title="No habits yet" sub="Add one above to start tracking." />
-        : habits.map((h) => (
+        : habits.map((h) => {
+          const linked = h.purposeId && purposeText(h.purposeId);
+          return (
           <div key={h.id} className="card" style={{ padding: 14, marginBottom: 12 }}>
             <div style={{ display: "flex", alignItems: "center", marginBottom: 11 }}>
               <div style={{ flex: 1 }}>
@@ -1845,8 +1906,36 @@ function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit }) {
                 <div className="mono" style={{ fontSize: 18, color: "var(--clay)", lineHeight: 1 }}><Flame size={15} style={{ verticalAlign: -2 }} /> {habitStreak(h, log)}</div>
                 <div className="mono" style={{ fontSize: 10, color: "var(--muted)" }}>{habitRate(h, log)}% · 30d</div>
               </div>
+              <button className="btn btn-sm btn-ghost" title="Link to a Purpose" onClick={() => setLinkFor(linkFor === h.id ? null : h.id)}><Sparkles size={13} /></button>
               <button className="btn btn-sm btn-danger" onClick={() => deleteHabit(h.id)}><Trash2 size={13} /></button>
             </div>
+
+            {linked && (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontSize: 12, color: "var(--clay)" }}>
+                <Sparkles size={12} /> <span style={{ fontStyle: "italic" }}>in service of: {linked}</span>
+              </div>
+            )}
+
+            {linkFor === h.id && (
+              <div className="rise" style={{ marginBottom: 11, padding: 11, background: "var(--paper2)", borderRadius: 9 }}>
+                {purposes.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: "var(--ink2)" }}>
+                    No Purpose statements yet. Add some under <a className="linklike" onClick={() => setView("horizons")}>Goals · Vision · Purpose</a>, then link them here.
+                  </div>
+                ) : (
+                  <>
+                    <div className="subq" style={{ marginBottom: 6 }}>THIS ROUTINE SERVES…</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {purposes.map((p) => (
+                        <Pill key={p.id} on={h.purposeId === p.id} onClick={() => { updateHabit(h.id, { purposeId: h.purposeId === p.id ? null : p.id }); setLinkFor(null); }}>{p.text}</Pill>
+                      ))}
+                      {h.purposeId && <Pill onClick={() => { updateHabit(h.id, { purposeId: null }); setLinkFor(null); }}>✕ clear</Pill>}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             <div className="hgrid">
               {last14.map((ds) => {
                 const sched = isScheduled(h, ds);
@@ -1861,7 +1950,8 @@ function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit }) {
               })}
             </div>
           </div>
-        ))}
+          );
+        })}
     </div>
   );
 }
@@ -2455,6 +2545,48 @@ function WhatsNewModal({ name, entries, onClose }) {
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
           <button className="btn btn-accent" onClick={onClose}>Got it</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ meta, onSaveName, onOpenExport, onClose }) {
+  const [name, setName] = useState(meta.name || "");
+  const started = meta.journeyStarted ? new Date(meta.journeyStarted).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) : null;
+  return (
+    <div className="overlay" onClick={onClose}>
+      <div className="card rise" style={{ width: 480, maxWidth: "100%", padding: 22 }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <span className="serif" style={{ fontSize: 21 }}>Settings</span>
+          <button className="btn btn-ghost" onClick={onClose}><X size={16} /></button>
+        </div>
+
+        {/* Profile */}
+        <div className="subq" style={{ marginBottom: 7 }}>PROFILE</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+          <input className="input" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
+          <button className="btn btn-accent btn-sm" onClick={() => onSaveName(name.trim())} disabled={name.trim() === (meta.name || "")}>Save</button>
+        </div>
+        {started && <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 16 }}>Surviving since {started}</div>}
+
+        {/* Account — placeholder until Supabase sign-in lands */}
+        <div className="subq" style={{ marginBottom: 7 }}>ACCOUNT</div>
+        <div className="card" style={{ padding: 12, marginBottom: 16, display: "flex", alignItems: "center", gap: 10, background: "var(--paper2)" }}>
+          <Lock size={15} color="var(--muted)" />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13 }}>Cloud sync &amp; sign-in</div>
+            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>Coming soon — sync progress across devices</div>
+          </div>
+        </div>
+
+        {/* Data */}
+        <div className="subq" style={{ marginBottom: 7 }}>DATA</div>
+        <button className="btn btn-sm" style={{ width: "100%", justifyContent: "flex-start" }} onClick={onOpenExport}>
+          <Download size={14} /> Export / Import your data
+        </button>
+        <div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+          Your data lives on this device. Export regularly as a backup, and to move between devices until cloud sync arrives.
         </div>
       </div>
     </div>
