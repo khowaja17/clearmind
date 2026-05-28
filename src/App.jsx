@@ -4,7 +4,7 @@ import {
   CheckCircle2, Plus, Trash2, Calendar, ChevronRight, ChevronDown,
   Check, X, Download, Upload, RotateCcw, Flame, Sparkles, ArrowRight,
   AlertTriangle, Sun, ListChecks, Send, Clipboard, Filter, Pencil, Settings2,
-  Archive, Lock, Link2, Compass, Mountain, Target, Radar, ShoppingBag, Skull, Crosshair, Shield
+  Archive, Lock, Link2, Compass, Mountain, Target, Radar, ShoppingBag, Skull, Crosshair, Shield, Menu
 } from "lucide-react";
 
 /* ============================================================================
@@ -428,6 +428,43 @@ const STYLE = `
 .raid:hover { background:var(--paper2); border-color:var(--line2); }
 .subq { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:1.5px; font-style:normal; vertical-align:middle; margin-left:6px; }
 
+/* ---- App shell layout (desktop default = two columns) ---- */
+.app-shell { position:relative; height:760px; display:flex; overflow:hidden; border-radius:14px; border:1px solid var(--line); }
+.sidebar { width:232px; flex-shrink:0; background:var(--paper2); border-right:1px solid var(--line);
+  padding:18px 13px; display:flex; flex-direction:column; overflow:auto; }
+.mobile-topbar { display:none; }
+.drawer-backdrop { display:none; }
+.hamburger { display:inline-flex; align-items:center; justify-content:center; width:38px; height:38px;
+  border-radius:9px; border:1px solid var(--line2); background:var(--card); color:var(--ink); cursor:pointer; }
+.hamburger:hover { background:var(--paper2); }
+
+/* ---- Mobile / narrow screens: sidebar becomes an off-canvas drawer ---- */
+@media (max-width: 760px) {
+  .app-shell { height:100dvh; border-radius:0; border:none; }
+  .mobile-topbar { display:flex; align-items:center; gap:11px; padding:10px 14px;
+    border-bottom:1px solid var(--line); background:var(--card); flex-shrink:0; }
+  .sidebar {
+    position:absolute; top:0; left:0; bottom:0; z-index:60; width:264px; max-width:84vw;
+    transform:translateX(-100%); transition:transform .24s ease; box-shadow:0 0 0 rgba(0,0,0,0);
+  }
+  .app-shell.drawer-open .sidebar { transform:translateX(0); box-shadow:6px 0 24px rgba(0,0,0,.22); }
+  .app-shell.drawer-open .drawer-backdrop {
+    display:block; position:absolute; inset:0; z-index:55; background:rgba(20,16,14,.42);
+    animation:fade .2s ease;
+  }
+}
+/* On true desktop, never show the drawer chrome even if state flips */
+@media (min-width: 761px) {
+  .mobile-topbar, .drawer-backdrop { display:none !important; }
+  .sidebar { transform:none !important; }
+}
+/* Tighten interior spacing on phones so nothing clips */
+@media (max-width: 760px) {
+  .content-scroll { padding:16px !important; }
+  .strip { gap:10px; padding:7px 12px; flex-wrap:wrap; }
+  .strip .seg { font-size:11px; }
+}
+
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; }
 .hair { border-color:var(--line); }
 
@@ -793,7 +830,9 @@ export default function App() {
   const [meta, setMeta] = useState({ version: APP_VERSION, name: "" });
   const [onboarding, setOnboarding] = useState(false);
   const [whatsNew, setWhatsNew] = useState(null); // array of {version, notes} or null
+  const [drawerOpen, setDrawerOpen] = useState(false); // mobile nav drawer
   const captureRef = useRef(null);
+  const aside_touchX = useRef(null);
 
   // ---- load (with version detection + migrations) ----
   useEffect(() => {
@@ -1215,11 +1254,15 @@ export default function App() {
   ];
 
   return (
-    <div className={"gtd" + (game.inSiege ? " siege" : "")} style={{ position: "relative", height: 760, display: "flex", overflow: "hidden", borderRadius: 14, border: "1px solid var(--line)" }}>
+    <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "")}>
       <style>{STYLE}</style>
 
-      {/* SIDEBAR */}
-      <aside style={{ width: 232, flexShrink: 0, background: "var(--paper2)", borderRight: "1px solid var(--line)", padding: "18px 13px", display: "flex", flexDirection: "column", overflow: "auto" }}>
+      {/* Mobile backdrop — tap to close the drawer */}
+      <div className="drawer-backdrop" onClick={() => setDrawerOpen(false)} />
+
+      {/* SIDEBAR (permanent on desktop, drawer on mobile) */}
+      <aside className="sidebar" onTouchStart={(e) => { aside_touchX.current = e.touches[0].clientX; }}
+        onTouchEnd={(e) => { if (aside_touchX.current != null && e.changedTouches[0].clientX < aside_touchX.current - 50) setDrawerOpen(false); aside_touchX.current = null; }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 6px 16px" }}>
           <div style={{ width: 30, height: 30, borderRadius: 9, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <Sparkles size={17} color="#fbf9f4" />
@@ -1236,7 +1279,7 @@ export default function App() {
             );
             const I = n.icon;
             return (
-              <button key={n.id} className={"nav" + (view === n.id ? " active" : "")} onClick={() => setView(n.id)}>
+              <button key={n.id} className={"nav" + (view === n.id ? " active" : "")} onClick={() => { setView(n.id); setDrawerOpen(false); }}>
                 <I size={17} className="ico" />
                 <span>{n.label}</span>
                 {n.warn ? <span className="count hot" title="stalled projects">{n.warn}!</span>
@@ -1259,7 +1302,15 @@ export default function App() {
       </aside>
 
       {/* MAIN */}
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <main className="main-col" style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+        {/* MOBILE TOP BAR — hamburger to open the drawer; hidden on desktop */}
+        <div className="mobile-topbar">
+          <button className="hamburger" aria-label="Open menu" onClick={() => setDrawerOpen(true)}>
+            <Menu size={20} />
+          </button>
+          <span className="serif" style={{ fontSize: 17, fontWeight: 600 }}>Clearmind</span>
+        </div>
+
         {/* STATUS STRIP — glanceable, doorway to the Watchtower */}
         <StatusStrip threat={threat} band={band} lvl={lvl} rank={rank} gtd={game.gtd} siege={game.inSiege} onClick={goWatch} />
 
@@ -1273,7 +1324,7 @@ export default function App() {
           </div>
         </div>
 
-        <div style={{ flex: 1, overflow: "auto", padding: "22px" }}>
+        <div className="content-scroll" style={{ flex: 1, overflow: "auto", padding: "22px" }}>
           {view === "watchtower" && <Watchtower {...{ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit: setEditId, buyGear, equipGear }} />}
           {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items, name: meta.name }} />}
           {view === "inbox" && <InboxView {...{ inbox, setClarifyId }} />}
