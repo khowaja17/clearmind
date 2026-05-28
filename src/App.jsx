@@ -1571,7 +1571,9 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
   const [menuPos, setMenuPos] = useState(null); // {top,right} anchor for the fixed popover
   const [confirmDel, setConfirmDel] = useState(null); // project id pending delete confirm
   const areaName = (id) => areas.find((a) => a.id === id)?.title;
+  const menuProject = activeProjects.find((p) => p.id === menuFor);
   return (
+    <>
     <div className="stagger">
       <SectionTitle sub="Any outcome needing more than one step. Chain tasks with precursors so only what's truly doable surfaces as a next action.">Projects <span className="subq">INFESTED STRUCTURES</span></SectionTitle>
       <div style={{ display: "flex", gap: 9, marginBottom: 18 }}>
@@ -1610,39 +1612,6 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
                     }}>
                     <Settings2 size={14} />
                   </button>
-                  {menuFor === p.id && menuPos && (
-                    <>
-                      <div style={{ position: "fixed", inset: 0, zIndex: 80 }} onClick={() => { setMenuFor(null); setConfirmDel(null); }} />
-                      <div className="card rise" style={{ position: "fixed", top: menuPos.top, right: menuPos.right, zIndex: 81, width: 230, padding: 10, boxShadow: "0 10px 28px rgba(0,0,0,.20)" }}>
-                        {areas.length > 0 && (
-                          <div style={{ marginBottom: 10 }}>
-                            <div className="subq" style={{ marginBottom: 5 }}>AREA OF FOCUS</div>
-                            <select className="input" style={{ width: "100%", padding: "6px 8px", fontSize: 12.5 }} value={p.areaId || ""}
-                              onChange={(e) => assignProjectArea(p.id, e.target.value || null)}>
-                              <option value="">— no area —</option>
-                              {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
-                            </select>
-                          </div>
-                        )}
-                        <div className="subq" style={{ marginBottom: 5 }}>ACTIONS</div>
-                        <button className="btn btn-ghost btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}
-                          onClick={() => { updateProject(p.id, { status: "complete" }); setMenuFor(null); }}>
-                          <Check size={14} /> Mark complete
-                        </button>
-                        {confirmDel === p.id ? (
-                          <button className="btn btn-sm btn-clay" style={{ width: "100%", justifyContent: "flex-start", marginTop: 4 }}
-                            onClick={() => { deleteProject(p.id); setMenuFor(null); setConfirmDel(null); }}>
-                            <Trash2 size={14} /> Tap again to delete
-                          </button>
-                        ) : (
-                          <button className="btn btn-ghost btn-sm btn-danger" style={{ width: "100%", justifyContent: "flex-start", marginTop: 4 }}
-                            onClick={() => setConfirmDel(p.id)}>
-                            <Trash2 size={14} /> Delete project…
-                          </button>
-                        )}
-                      </div>
-                    </>
-                  )}
                 </div>
               </div>
               {open && <ProjectBody p={p} acts={acts} addActionToProject={addActionToProject} toggleDone={toggleDone}
@@ -1651,6 +1620,43 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
           );
         })}
     </div>
+
+    {/* Settings popover rendered at the view root — outside .stagger, so no transformed
+        ancestor hijacks position:fixed. This is what keeps it from being clipped by a card. */}
+    {menuProject && menuPos && (
+      <>
+        <div style={{ position: "fixed", inset: 0, zIndex: 80 }} onClick={() => { setMenuFor(null); setConfirmDel(null); }} />
+        <div className="card" style={{ position: "fixed", top: menuPos.top, right: menuPos.right, zIndex: 81, width: 230, padding: 10, boxShadow: "0 10px 28px rgba(0,0,0,.20)" }}>
+          {areas.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div className="subq" style={{ marginBottom: 5 }}>AREA OF FOCUS</div>
+              <select className="input" style={{ width: "100%", padding: "6px 8px", fontSize: 12.5 }} value={menuProject.areaId || ""}
+                onChange={(e) => assignProjectArea(menuProject.id, e.target.value || null)}>
+                <option value="">— no area —</option>
+                {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
+              </select>
+            </div>
+          )}
+          <div className="subq" style={{ marginBottom: 5 }}>ACTIONS</div>
+          <button className="btn btn-ghost btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}
+            onClick={() => { updateProject(menuProject.id, { status: "complete" }); setMenuFor(null); }}>
+            <Check size={14} /> Mark complete
+          </button>
+          {confirmDel === menuProject.id ? (
+            <button className="btn btn-sm btn-clay" style={{ width: "100%", justifyContent: "flex-start", marginTop: 4 }}
+              onClick={() => { deleteProject(menuProject.id); setMenuFor(null); setConfirmDel(null); }}>
+              <Trash2 size={14} /> Tap again to delete
+            </button>
+          ) : (
+            <button className="btn btn-ghost btn-sm btn-danger" style={{ width: "100%", justifyContent: "flex-start", marginTop: 4 }}
+              onClick={() => setConfirmDel(menuProject.id)}>
+              <Trash2 size={14} /> Delete project…
+            </button>
+          )}
+        </div>
+      </>
+    )}
+    </>
   );
 }
 
