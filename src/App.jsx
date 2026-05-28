@@ -441,11 +441,14 @@ const STYLE = `
 /* ---- Mobile / narrow screens: sidebar becomes an off-canvas drawer ---- */
 @media (max-width: 760px) {
   .app-shell { height:100dvh; border-radius:0; border:none; }
-  .mobile-topbar { display:flex; align-items:center; gap:11px; padding:10px 14px;
+  .mobile-topbar { display:flex; align-items:center; gap:11px;
+    padding:10px 14px;
+    padding-top:calc(10px + env(safe-area-inset-top, 0px));
     border-bottom:1px solid var(--line); background:var(--card); flex-shrink:0; }
   .sidebar {
     position:absolute; top:0; left:0; bottom:0; z-index:60; width:264px; max-width:84vw;
     transform:translateX(-100%); transition:transform .24s ease; box-shadow:0 0 0 rgba(0,0,0,0);
+    padding-top:calc(18px + env(safe-area-inset-top, 0px));
   }
   .app-shell.drawer-open .sidebar { transform:translateX(0); box-shadow:6px 0 24px rgba(0,0,0,.22); }
   .app-shell.drawer-open .drawer-backdrop {
@@ -460,7 +463,7 @@ const STYLE = `
 }
 /* Tighten interior spacing on phones so nothing clips */
 @media (max-width: 760px) {
-  .content-scroll { padding:16px !important; }
+  .content-scroll { padding:16px !important; padding-bottom:calc(16px + env(safe-area-inset-bottom, 0px)) !important; }
   .strip { gap:10px; padding:7px 12px; flex-wrap:wrap; }
   .strip .seg { font-size:11px; }
 }
