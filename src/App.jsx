@@ -71,7 +71,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 6;
+const APP_VERSION = 7;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -117,6 +117,30 @@ const MIGRATIONS = {
       "Link a habit to a Purpose, so a daily routine carries the reason behind it.",
     ],
     // purely additive (name in meta, purposeId on habits, project menu) — no data reshape needed
+  },
+  7: {
+    notes: [
+      "New 8-bit survivor avatars — pick a look in the Watchtower shop, female and male presets to start.",
+      "Themes! Spend ₲ to recolor the whole app — Dusk Patrol, Ember Watch, Ash & Bone, and more.",
+      "The old placeholder cosmetics were retired; your balance and rank are untouched.",
+    ],
+    migrate: (all) => {
+      // Convert the old { ownedGear, equipped:{avatar,skin,strip} } shape to the new
+      // { ownedCosmetics, equipped:{avatar,theme} }. Everyone keeps the free starters;
+      // old purchased placeholders are dropped (they no longer exist), balance is kept.
+      const g = all.game || {};
+      const owned = new Set(["av-f-survivor", "av-m-survivor", "theme-settlement"]);
+      // best-effort map of old skin purchases → new themes, so spenders aren't fully reset
+      const skinMap = { "skin-dusk": "theme-dusk", "skin-ember": "theme-ember" };
+      (g.ownedGear || []).forEach((id) => { if (skinMap[id]) owned.add(skinMap[id]); });
+      const game = {
+        ...g,
+        ownedCosmetics: Array.from(owned),
+        equipped: { avatar: "av-f-survivor", theme: "theme-settlement" },
+      };
+      delete game.ownedGear;
+      return { ...all, game };
+    },
   },
 };
 
@@ -390,15 +414,74 @@ const THREAT_BANDS = [
 const threatBand = (v) => THREAT_BANDS.find((b) => v <= b.max) || THREAT_BANDS[THREAT_BANDS.length - 1];
 
 // Cosmetic gear catalog (gear is visual only; rank gates tier, GTD buys item)
-const GEAR = [
-  { id: "skin-default", kind: "skin", name: "Settlement Standard", tier: 1, cost: 0, swatch: "#2c6a55", desc: "The default look." },
-  { id: "avatar-drifter", kind: "avatar", name: "Lone Drifter", tier: 1, cost: 0, swatch: "#5c554a", desc: "A coat and a quiet stare." },
-  { id: "avatar-scout", kind: "avatar", name: "Field Scout", tier: 2, cost: 120, swatch: "#bd5b27", desc: "Goggles, scarf, fast feet." },
-  { id: "skin-dusk", kind: "skin", name: "Dusk Patrol", tier: 2, cost: 200, swatch: "#3a4a63", desc: "Cool blue settlement palette." },
-  { id: "avatar-warden", kind: "avatar", name: "The Warden", tier: 4, cost: 450, swatch: "#1f4e3e", desc: "Armor plate and a long shadow." },
-  { id: "skin-ember", kind: "skin", name: "Ember Watch", tier: 4, cost: 600, swatch: "#7a2e1a", desc: "Firelit reds for the long night." },
-  { id: "avatar-architect", kind: "avatar", name: "Architect", tier: 6, cost: 1200, swatch: "#c08a16", desc: "The one who rebuilt it all." },
-  { id: "strip-neon", kind: "strip", name: "Neon HUD", tier: 3, cost: 300, swatch: "#16a085", desc: "A brighter status strip." },
+/* ============================================================================
+   COSMETICS — avatars (8-bit pixel art) and themes (palette swaps)
+   Avatars are drawn from compact 12-row grids: each string is a row, each char
+   a palette key. "." = transparent. Recoloring = swapping the palette map.
+============================================================================ */
+const PX = {
+  // shared silhouette grid; palettes differ per avatar. 12x12.
+  female: [
+    "....hhhh....",
+    "...hhhhhh...",
+    "..hhssshh...",
+    "..hsskssh...",
+    "..hssssh....",
+    "...ssss.....",
+    "..cccccc....",
+    ".ccccccccc..",
+    ".cc cccc cc.",
+    ".cc cccc cc.",
+    "...bb..bb...",
+    "...bb..bb...",
+  ],
+  male: [
+    "...hhhhh....",
+    "..hhhhhhh...",
+    "..hsssssh...",
+    "..hsskssh...",
+    "..hssssh....",
+    "...ssss.....",
+    ".. kcccck...",
+    ".cccccccccc.",
+    ".cc cccc cc.",
+    ".ccccccccc..",
+    "...bb.bb....",
+    "...bb.bb....",
+  ],
+};
+// palette keys: h hair, s skin, k detail(eyes/strap), c clothing, b boots/legs
+const AVATARS = [
+  { id: "av-f-survivor", name: "Survivor (F)", grid: "female", tier: 1, cost: 0,
+    pal: { h: "#3a2e26", s: "#d8a779", k: "#221f1a", c: "#2c6a55", b: "#4a3d33" } },
+  { id: "av-m-survivor", name: "Survivor (M)", grid: "male", tier: 1, cost: 0,
+    pal: { h: "#2a2420", s: "#cf9b6e", k: "#221f1a", c: "#3a4a63", b: "#4a3d33" } },
+  { id: "av-f-scout", name: "Scout (F)", grid: "female", tier: 2, cost: 140,
+    pal: { h: "#6b3410", s: "#e0b487", k: "#221f1a", c: "#bd5b27", b: "#5c554a" } },
+  { id: "av-m-ranger", name: "Ranger (M)", grid: "male", tier: 2, cost: 140,
+    pal: { h: "#1f3326", s: "#c98f63", k: "#221f1a", c: "#3f6b3a", b: "#3d3329" } },
+  { id: "av-f-warden", name: "Warden (F)", grid: "female", tier: 4, cost: 480,
+    pal: { h: "#222", s: "#d8a779", k: "#c08a16", c: "#1f4e3e", b: "#2a2a2a" } },
+  { id: "av-m-warden", name: "Warden (M)", grid: "male", tier: 4, cost: 480,
+    pal: { h: "#222", s: "#cf9b6e", k: "#c08a16", c: "#1f4e3e", b: "#2a2a2a" } },
+  { id: "av-f-architect", name: "Architect (F)", grid: "female", tier: 6, cost: 1100,
+    pal: { h: "#4a3a1a", s: "#e0b487", k: "#c08a16", c: "#7a2e1a", b: "#c08a16" } },
+  { id: "av-m-architect", name: "Architect (M)", grid: "male", tier: 6, cost: 1100,
+    pal: { h: "#3a2e10", s: "#cf9b6e", k: "#c08a16", c: "#7a2e1a", b: "#c08a16" } },
+];
+
+// Themes recolor the whole palette (buttons + backdrop) via a class on .gtd.
+// "vars" override the base CSS variables. tier gates access, cost is in ₲.
+const THEMES = [
+  { id: "theme-settlement", name: "Settlement", tier: 1, cost: 0, swatch: "#2c6a55", vars: null },
+  { id: "theme-dusk", name: "Dusk Patrol", tier: 2, cost: 220, swatch: "#3a4a63",
+    vars: { "--paper": "#eef0f4", "--paper2": "#e2e6ee", "--card": "#f8fafc", "--line": "#d4dae6", "--line2": "#c2cad9", "--pine": "#3a4a63", "--pine-d": "#27324a", "--pine-soft": "#dde3ef", "--clay": "#c2763a", "--clay-soft": "#f0e4d6", "--amber": "#b08518" } },
+  { id: "theme-ember", name: "Ember Watch", tier: 4, cost: 520, swatch: "#7a2e1a",
+    vars: { "--paper": "#f4ece6", "--paper2": "#ece0d6", "--card": "#fbf6f1", "--line": "#e3d2c4", "--line2": "#d6c0ad", "--pine": "#a23a28", "--pine-d": "#7a2418", "--pine-soft": "#f0ddd4", "--clay": "#c2762a", "--clay-soft": "#f3e4d2", "--amber": "#bf7b1a" } },
+  { id: "theme-mono", name: "Ash & Bone", tier: 3, cost: 360, swatch: "#3a3a3a",
+    vars: { "--paper": "#ecebe8", "--paper2": "#e0dfdb", "--card": "#f7f6f3", "--line": "#d8d6d0", "--line2": "#c6c4bc", "--pine": "#3a3a38", "--pine-d": "#222220", "--pine-soft": "#e0e0db", "--clay": "#8a6a4a", "--clay-soft": "#e8e2d8", "--amber": "#9a8a4a" } },
+  { id: "theme-bloom", name: "Spring Bloom", tier: 5, cost: 700, swatch: "#7a4a8a",
+    vars: { "--paper": "#f3eef4", "--paper2": "#e9e1ec", "--card": "#fbf8fc", "--line": "#e0d4e6", "--line2": "#cebcd6", "--pine": "#7a4a8a", "--pine-d": "#5a3468", "--pine-soft": "#ece0f0", "--clay": "#c25a8a", "--clay-soft": "#f3dde8", "--amber": "#c08a16" } },
 ];
 
 /* ============================================================================
@@ -843,7 +926,7 @@ export default function App() {
   const [settings, setSettings] = useState({ contexts: DEFAULT_CONTEXTS, lastReview: null });
   const [areas, setAreas] = useState([]);
   const [horizons, setHorizons] = useState({ goals: [], vision: [], purpose: [] });
-  const [game, setGame] = useState({ xp: 0, gtd: 0, ownedGear: ["skin-default", "avatar-drifter"], equipped: { avatar: "avatar-drifter", skin: "skin-default", strip: null }, lastTended: null, siegeBrokenAt: null, inSiege: false });
+  const [game, setGame] = useState({ xp: 0, gtd: 0, ownedCosmetics: ["av-f-survivor", "av-m-survivor", "theme-settlement"], equipped: { avatar: "av-f-survivor", theme: "theme-settlement" }, lastTended: null, siegeBrokenAt: null, inSiege: false });
   const [toasts, setToasts] = useState([]);
 
   const [view, setView] = useState("today");
@@ -875,7 +958,7 @@ export default function App() {
         settings: await store.load(KEYS.settings, { contexts: DEFAULT_CONTEXTS, lastReview: null }),
         areas: await store.load(KEYS.areas, []),
         horizons: await store.load(KEYS.horizons, { goals: [], vision: [], purpose: [] }),
-        game: await store.load(KEYS.game, { xp: 0, gtd: 0, ownedGear: ["skin-default", "avatar-drifter"], equipped: { avatar: "avatar-drifter", skin: "skin-default", strip: null }, lastTended: null, siegeBrokenAt: null, inSiege: false }),
+        game: await store.load(KEYS.game, { xp: 0, gtd: 0, ownedCosmetics: ["av-f-survivor", "av-m-survivor", "theme-settlement"], equipped: { avatar: "av-f-survivor", theme: "theme-settlement" }, lastTended: null, siegeBrokenAt: null, inSiege: false }),
       };
       const savedMeta = await store.load(KEYS.meta, null);
 
@@ -1161,16 +1244,16 @@ export default function App() {
     if (after > before) setTimeout(() => pushToast(`◆ Rank up — Level ${after}, ${rankFor(after)}`), 1100);
   };
 
-  // ---- cosmetic gear ----
-  const buyGear = (g) => {
-    if (game.ownedGear.includes(g.id) || game.gtd < g.cost || game.inSiege) return;
-    const ng = { ...game, gtd: game.gtd - g.cost, ownedGear: [...game.ownedGear, g.id] };
-    saveGame(ng);
-    pushToast(`Acquired: ${g.name}`);
+  // ---- cosmetics (avatars + themes) ----
+  const ownsCosmetic = (id) => (game.ownedCosmetics || []).includes(id);
+  const buyCosmetic = (item) => {
+    if (ownsCosmetic(item.id) || game.gtd < item.cost || game.inSiege) return;
+    saveGame({ ...game, gtd: game.gtd - item.cost, ownedCosmetics: [...(game.ownedCosmetics || []), item.id] });
+    pushToast(`Acquired: ${item.name}`);
   };
-  const equipGear = (g) => {
-    if (!game.ownedGear.includes(g.id)) return;
-    saveGame({ ...game, equipped: { ...game.equipped, [g.kind]: g.id } });
+  const equipCosmetic = (kind, item) => { // kind: "avatar" | "theme"
+    if (!ownsCosmetic(item.id)) return;
+    saveGame({ ...game, equipped: { ...game.equipped, [kind]: item.id } });
   };
 
   // ---- export / import ----
@@ -1284,7 +1367,8 @@ export default function App() {
   ];
 
   return (
-    <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "")}>
+    <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "")}
+      style={!game.inSiege && themeById(game.equipped?.theme).vars ? themeById(game.equipped.theme).vars : undefined}>
       <style>{STYLE}</style>
 
       {/* Mobile backdrop — tap to close the drawer */}
@@ -1355,7 +1439,7 @@ export default function App() {
         </div>
 
         <div className="content-scroll" style={{ flex: 1, overflow: "auto", padding: "22px" }}>
-          {view === "watchtower" && <Watchtower {...{ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit: setEditId, buyGear, equipGear }} />}
+          {view === "watchtower" && <Watchtower {...{ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit: setEditId, buyCosmetic, equipCosmetic }} />}
           {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items, name: meta.name }} />}
           {view === "inbox" && <InboxView {...{ inbox, setClarifyId }} />}
           {view === "next" && <NextView {...{ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, projName, count: filteredNexts.length, blockedCount, onEdit: setEditId, onManageCtx: () => setCtxMgrOpen(true), items }} />}
@@ -2289,6 +2373,31 @@ function HorizonsView({ horizons, areas, addHorizon, updateHorizon, deleteHorizo
   );
 }
 
+// Renders an avatar's pixel grid as crisp SVG rects. size = pixel box in px.
+function AvatarPixels({ avatar, size = 56, bg = "transparent" }) {
+  const a = avatar || AVATARS[0];
+  const grid = PX[a.grid] || PX.female;
+  const cols = grid[0].length, rows = grid.length;
+  const cell = size / Math.max(cols, rows);
+  const rects = [];
+  grid.forEach((row, y) => {
+    for (let x = 0; x < row.length; x++) {
+      const ch = row[x];
+      if (ch === "." || ch === " ") continue;
+      const fill = a.pal[ch];
+      if (!fill) continue;
+      rects.push(<rect key={y + "-" + x} x={x * cell} y={y * cell} width={cell + 0.4} height={cell + 0.4} fill={fill} />);
+    }
+  });
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${cols * cell} ${rows * cell}`} style={{ background: bg, borderRadius: 10, shapeRendering: "crispEdges", display: "block" }}>
+      {rects}
+    </svg>
+  );
+}
+const themeById = (id) => THEMES.find((t) => t.id === id) || THEMES[0];
+const avatarById = (id) => AVATARS.find((a) => a.id === id) || AVATARS[0];
+
 function Glyph() { return <span className="gtd-glyph" style={{ padding: "0 3px" }}>G</span>; }
 
 function StatusStrip({ threat, band, lvl, rank, gtd, siege, onClick }) {
@@ -2328,7 +2437,7 @@ function MeterRing({ value, color, siege }) {
   );
 }
 
-function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit, buyGear, equipGear }) {
+function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit, buyCosmetic, equipCosmetic }) {
   const c = `var(${band.varc})`;
   // high-value raids: biggest brute, project nearest a claim, overdue fortify
   const raids = [];
@@ -2351,7 +2460,8 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
   if (firstInbox) raids.push({ icon: Radar, color: c, title: "Identify the shapes in the fog", sub: `${items.filter((i) => i.type === "inbox").length} unprocessed · +10 XP each`, go: () => setView("inbox") });
 
   const tier = rankTier(lvl.level);
-  const avatar = GEAR.find((g) => g.id === game.equipped.avatar) || GEAR[1];
+  const avatar = avatarById(game.equipped?.avatar);
+  const owned = (id) => (game.ownedCosmetics || []).includes(id);
 
   return (
     <div className="stagger">
@@ -2395,8 +2505,8 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
         {/* SURVIVOR CARD */}
         <div className="card" style={{ padding: 16 }}>
           <div style={{ display: "flex", gap: 13, alignItems: "center", marginBottom: 14 }}>
-            <div style={{ width: 56, height: 56, borderRadius: 12, background: avatar.swatch, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-              <Skull size={26} color="#fbf9f4" style={{ opacity: .92 }} />
+            <div style={{ width: 56, height: 56, borderRadius: 12, background: "var(--paper2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}>
+              <AvatarPixels avatar={avatar} size={56} />
             </div>
             <div style={{ flex: 1 }}>
               <div className="serif" style={{ fontSize: 20, lineHeight: 1 }}>{rank}</div>
@@ -2438,27 +2548,54 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
       <div className="subq" style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
         <ShoppingBag size={12} /> QUARTERMASTER · COSMETIC ONLY {game.inSiege && <span style={{ color: "var(--t-siege)" }}>· CLOSED (SIEGE)</span>}
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
-        {GEAR.map((g) => {
-          const owned = game.ownedGear.includes(g.id);
-          const equipped = game.equipped[g.kind] === g.id;
-          const tierLocked = rankTier(lvl.level) < g.tier;
-          const affordable = game.gtd >= g.cost;
+
+      {/* AVATARS */}
+      <div className="subq" style={{ marginBottom: 7, color: "var(--pine)" }}>SURVIVORS</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 18 }}>
+        {AVATARS.map((a) => {
+          const isOwned = owned(a.id);
+          const isEquipped = game.equipped?.avatar === a.id;
+          const tierLocked = rankTier(lvl.level) < a.tier;
+          const affordable = game.gtd >= a.cost;
           return (
-            <div key={g.id} className={"gear-card" + (equipped ? " equipped" : "") + (tierLocked ? " locked" : "")}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <div style={{ width: 22, height: 22, borderRadius: 6, background: g.swatch, flexShrink: 0 }} />
-                <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.1 }}>{g.name}</span>
+            <div key={a.id} className={"gear-card" + (isEquipped ? " equipped" : "") + (tierLocked ? " locked" : "")} style={{ alignItems: "center", textAlign: "center" }}>
+              <div style={{ background: "var(--paper2)", borderRadius: 10, padding: 6 }}><AvatarPixels avatar={a} size={52} /></div>
+              <span style={{ fontSize: 12, fontWeight: 500, lineHeight: 1.1 }}>{a.name}</span>
+              <div style={{ marginTop: "auto" }}>
+                {isEquipped ? <span className="pill on">equipped</span>
+                  : isOwned ? <button className="btn btn-sm" onClick={() => equipCosmetic("avatar", a)}>Equip</button>
+                  : tierLocked ? <span className="pill" style={{ display: "inline-flex", gap: 3, alignItems: "center" }}><Lock size={9} /> T{a.tier}</span>
+                  : <button className="btn btn-sm" disabled={!affordable || game.inSiege} onClick={() => buyCosmetic(a)} style={{ opacity: (!affordable || game.inSiege) ? .5 : 1 }}><Glyph />{a.cost}</button>}
               </div>
-              <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.3 }}>{g.desc}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* THEMES */}
+      <div className="subq" style={{ marginBottom: 7, color: "var(--clay)" }}>THEMES — RECOLOR BUTTONS &amp; BACKDROP</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
+        {THEMES.map((t) => {
+          const isOwned = owned(t.id);
+          const isEquipped = game.equipped?.theme === t.id;
+          const tierLocked = rankTier(lvl.level) < t.tier;
+          const affordable = game.gtd >= t.cost;
+          // mini palette preview from the theme's key colors
+          const sw = t.vars ? [t.vars["--paper"], t.vars["--pine"], t.vars["--clay"], t.vars["--amber"]] : ["#f3efe6", "#2c6a55", "#bd5b27", "#c08a16"];
+          return (
+            <div key={t.id} className={"gear-card" + (isEquipped ? " equipped" : "") + (tierLocked ? " locked" : "")}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", flexShrink: 0, border: "1px solid var(--line2)" }}>
+                  {sw.map((c, i) => <div key={i} style={{ width: 12, height: 22, background: c }} />)}
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.1 }}>{t.name}</span>
+              </div>
               <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>{g.kind} · T{g.tier}</span>
-                {equipped ? <span className="pill on">equipped</span>
-                  : owned ? <button className="btn btn-sm" onClick={() => equipGear(g)}>Equip</button>
-                  : tierLocked ? <span className="pill" style={{ display: "inline-flex", gap: 3, alignItems: "center" }}><Lock size={9} /> tier {g.tier}</span>
-                  : <button className="btn btn-sm" disabled={!affordable || game.inSiege} onClick={() => buyGear(g)} style={{ opacity: (!affordable || game.inSiege) ? .5 : 1 }}>
-                      <Glyph />{g.cost}
-                    </button>}
+                <span className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>theme · T{t.tier}</span>
+                {isEquipped ? <span className="pill on">active</span>
+                  : isOwned ? <button className="btn btn-sm" onClick={() => equipCosmetic("theme", t)}>Apply</button>
+                  : tierLocked ? <span className="pill" style={{ display: "inline-flex", gap: 3, alignItems: "center" }}><Lock size={9} /> tier {t.tier}</span>
+                  : <button className="btn btn-sm" disabled={!affordable || game.inSiege} onClick={() => buyCosmetic(t)} style={{ opacity: (!affordable || game.inSiege) ? .5 : 1 }}><Glyph />{t.cost}</button>}
               </div>
             </div>
           );
