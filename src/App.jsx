@@ -1568,6 +1568,7 @@ function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, p
 function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit, areas, assignProjectArea }) {
   const [np, setNp] = useState("");
   const [menuFor, setMenuFor] = useState(null); // project id whose settings menu is open
+  const [menuPos, setMenuPos] = useState(null); // {top,right} anchor for the fixed popover
   const [confirmDel, setConfirmDel] = useState(null); // project id pending delete confirm
   const areaName = (id) => areas.find((a) => a.id === id)?.title;
   return (
@@ -1599,22 +1600,31 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
                     {areaName(p.areaId) && <span> · <Compass size={9} style={{ verticalAlign: -1 }} /> {areaName(p.areaId)}</span>}
                   </div>
                 </div>
-                {areas.length > 0 && (
-                  <select className="input" style={{ width: 130, padding: "5px 8px", fontSize: 12 }} value={p.areaId || ""}
-                    onChange={(e) => assignProjectArea(p.id, e.target.value || null)} title="Area of Focus">
-                    <option value="">— no area —</option>
-                    {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
-                  </select>
-                )}
-                <div style={{ position: "relative" }}>
+                <div>
                   <button className="btn btn-sm btn-ghost" title="Project settings"
-                    onClick={() => { setMenuFor(menuFor === p.id ? null : p.id); setConfirmDel(null); }}>
+                    onClick={(e) => {
+                      if (menuFor === p.id) { setMenuFor(null); return; }
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+                      setMenuFor(p.id); setConfirmDel(null);
+                    }}>
                     <Settings2 size={14} />
                   </button>
-                  {menuFor === p.id && (
+                  {menuFor === p.id && menuPos && (
                     <>
-                      <div style={{ position: "fixed", inset: 0, zIndex: 30 }} onClick={() => { setMenuFor(null); setConfirmDel(null); }} />
-                      <div className="card rise" style={{ position: "absolute", right: 0, top: "110%", zIndex: 31, width: 196, padding: 6, boxShadow: "0 8px 24px rgba(0,0,0,.16)" }}>
+                      <div style={{ position: "fixed", inset: 0, zIndex: 80 }} onClick={() => { setMenuFor(null); setConfirmDel(null); }} />
+                      <div className="card rise" style={{ position: "fixed", top: menuPos.top, right: menuPos.right, zIndex: 81, width: 230, padding: 10, boxShadow: "0 10px 28px rgba(0,0,0,.20)" }}>
+                        {areas.length > 0 && (
+                          <div style={{ marginBottom: 10 }}>
+                            <div className="subq" style={{ marginBottom: 5 }}>AREA OF FOCUS</div>
+                            <select className="input" style={{ width: "100%", padding: "6px 8px", fontSize: 12.5 }} value={p.areaId || ""}
+                              onChange={(e) => assignProjectArea(p.id, e.target.value || null)}>
+                              <option value="">— no area —</option>
+                              {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
+                            </select>
+                          </div>
+                        )}
+                        <div className="subq" style={{ marginBottom: 5 }}>ACTIONS</div>
                         <button className="btn btn-ghost btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}
                           onClick={() => { updateProject(p.id, { status: "complete" }); setMenuFor(null); }}>
                           <Check size={14} /> Mark complete
