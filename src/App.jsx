@@ -354,6 +354,18 @@ function rankFor(level) {
   for (const x of RANKS) if (level >= x.min) r = x;
   return r.name;
 }
+// Summarize a state blob into the human-facing stats used by the sync chooser.
+function statsOf(b) {
+  const xp = (b && b.game && b.game.xp) || 0;
+  const gtd = (b && b.game && b.game.gtd) || 0;
+  const level = levelFromXP(xp);
+  return {
+    xp, gtd, level, rank: rankFor(level),
+    items: (b && b.items || []).filter((i) => !i.done).length,
+    projects: (b && b.projects || []).filter((p) => p.status === "active").length,
+    habits: (b && b.habits || []).length,
+  };
+}
 const rankTier = (level) => RANKS.filter((r) => level >= r.min).length; // 1..8, gates gear tiers
 
 // ----- Threat (0–100), computed live from system state -----
@@ -949,7 +961,7 @@ export default function App() {
   const [session, setSession] = useState(null);          // Supabase auth session or null
   const [syncBusy, setSyncBusy] = useState(false);       // a cloud op is in flight
   const [lastCloudSync, setLastCloudSync] = useState(null); // timestamp of last successful cloud save/load
-  const [pendingCloud, setPendingCloud] = useState(null);   // {blob, at} older copy offered for export before overwrite
+  const [syncChoice, setSyncChoice] = useState(null);       // {local:{snap,stats}, cloud:{data,stats}} when user must pick
   const [editId, setEditId] = useState(null);
   const [ctxMgrOpen, setCtxMgrOpen] = useState(false);
   const [openArea, setOpenArea] = useState(null);
@@ -1006,16 +1018,20 @@ export default function App() {
   }, []);
 
   // ---- auth: pick up existing session, then listen for sign-in/out ----
+  // IMPORTANT: we do NOT reconcile here. Reconciliation must wait until local data has
+  // finished loading (the `loaded` flag), otherwise we'd snapshot empty initial state and
+  // push it to the cloud. We just record the session + a flag that a reconcile is needed;
+  // a separate effect below runs it once both session and loaded are true.
+  const needsReconcile = useRef(false);
   useEffect(() => {
     if (!syncEnabled) return;
     let unsub = () => {};
     (async () => {
       const sess = await getSession();
-      if (sess) { setSession(sess); reconcileOnSignIn(sess); }
+      if (sess) { needsReconcile.current = true; setSession(sess); }
       unsub = onAuthChange((s) => {
         setSession((prev) => {
-          // only reconcile on a real new sign-in (prev null → session present)
-          if (s && !prev) reconcileOnSignIn(s);
+          if (s && !prev) needsReconcile.current = true; // a real new sign-in
           return s;
         });
       });
@@ -1023,6 +1039,14 @@ export default function App() {
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Run the deferred reconcile exactly once local load is complete AND we have a session.
+  useEffect(() => {
+    if (!syncEnabled || !loaded || !session || !needsReconcile.current) return;
+    needsReconcile.current = false;
+    reconcileOnSignIn(session);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, session]);
 
   // push a loaded/migrated bundle into state
   function applyLoaded(d) {
@@ -1050,61 +1074,89 @@ export default function App() {
     saveSettings(b.settings); saveAreas(b.areas); saveHorizons(b.horizons); saveGame(b.game);
     if (blob.meta) saveMeta({ ...blob.meta, version: APP_VERSION });
   };
+
+  // How "full" a state blob is — guards against an empty snapshot clobbering real data.
+  const blobFullness = (b) => {
+    if (!b) return 0;
+    const items = (b.items || []).length;
+    const projects = (b.projects || []).length;
+    const habits = (b.habits || []).length;
+    const areas = (b.areas || []).length;
+    const logs = b.log ? Object.keys(b.log).length : 0;
+    const xp = (b.game && b.game.xp) || 0;
+    return items + projects + habits + areas + logs + (xp > 0 ? 1 : 0);
+  };
+  const isMeaningful = (b) => blobFullness(b) > 0;
+
   // Push current state to the cloud — called after key actions, only when signed in.
+  // Never pushes an empty snapshot (prevents wiping the cloud during an early/blank render).
   const pushCloud = async () => {
     if (!syncEnabled || !session) return;
+    const snap = snapshot();
+    if (!isMeaningful(snap)) return; // nothing real to save yet
     setSyncBusy(true);
-    const ok = await cloudSave(session.user.id, snapshot());
+    const ok = await cloudSave(session.user.id, snap);
     if (ok) setLastCloudSync(Date.now());
     setSyncBusy(false);
   };
-  // Reconcile local vs cloud on sign-in using newest-wins. Before overwriting the OLDER
-  // copy, stash it so the user can export it as a safety net.
+
+  // Reconcile local vs cloud on sign-in. Empty-vs-data resolves silently. When BOTH have
+  // real data, surface a chooser showing each copy's stats (level/xp/₲/counts) and let the
+  // user pick — no timestamps. Higher XP is pre-suggested since XP only ever climbs.
   const reconcileOnSignIn = async (sess) => {
     if (!syncEnabled || !sess) return;
     setSyncBusy(true);
     const cloud = await cloudLoad(sess.user.id);
-    const localAt = meta.updatedAt || 0;
-    const cloudAt = cloud ? Date.parse(cloud.updated_at) : 0;
-    if (!cloud) {
-      // first time on this account → seed cloud from local
-      await cloudSave(sess.user.id, snapshot());
-      setLastCloudSync(Date.now());
-    } else if (cloudAt > localAt) {
-      // cloud is newer → it wins; offer the local copy for export first
-      setPendingCloud({ blob: snapshot(), at: localAt, replaceWith: cloud.data, newAt: cloudAt, dir: "cloud-wins" });
-    } else if (localAt > cloudAt) {
-      // local is newer → push it up (offer the cloud copy for export first)
-      setPendingCloud({ blob: cloud.data, at: cloudAt, replaceWith: null, newAt: localAt, dir: "local-wins" });
+    const localSnap = snapshot();
+    const localFull = isMeaningful(localSnap);
+    const cloudFull = cloud && isMeaningful(cloud.data);
+
+    if (!cloud || (!cloudFull && localFull)) {
+      // no/empty cloud, local has data → local wins, seed/repair cloud
+      if (localFull) { await cloudSave(sess.user.id, localSnap); setLastCloudSync(Date.now()); }
+      else setLastCloudSync(Date.now());
+    } else if (cloudFull && !localFull) {
+      // fresh device, cloud has data → pull silently
+      applyBlob(cloud.data); setLastCloudSync(Date.now());
+    } else if (cloudFull && localFull) {
+      // both have data → if identical-enough by stats, just keep cloud; else ask the user
+      const ls = statsOf(localSnap), cs = statsOf(cloud.data);
+      if (ls.xp === cs.xp && ls.gtd === cs.gtd && ls.items === cs.items && ls.projects === cs.projects) {
+        setLastCloudSync(Date.now()); // effectively the same — no need to prompt
+      } else {
+        setSyncChoice({ local: { snap: localSnap, stats: ls }, cloud: { data: cloud.data, stats: cs } });
+      }
     } else {
-      setLastCloudSync(cloudAt || Date.now());
+      setLastCloudSync(Date.now());
     }
     setSyncBusy(false);
   };
-  // Resolve the pending reconcile once the user has decided about exporting the old copy.
-  const resolvePending = async () => {
-    if (!pendingCloud || !session) { setPendingCloud(null); return; }
+
+  // User picked a copy in the chooser. "local" keeps this device's data and pushes it to
+  // the cloud; "cloud" pulls the cloud copy down onto this device. Either way, both ends end
+  // up matching the chosen copy. The non-chosen copy is offered as a backup download first.
+  const chooseCopy = async (which) => {
+    if (!syncChoice || !session) { setSyncChoice(null); return; }
     setSyncBusy(true);
-    if (pendingCloud.dir === "cloud-wins") {
-      applyBlob(pendingCloud.replaceWith);
-      setLastCloudSync(pendingCloud.newAt);
+    if (which === "local") {
+      await cloudSave(session.user.id, syncChoice.local.snap);
+      setLastCloudSync(Date.now());
     } else {
-      await cloudSave(session.user.id, snapshot());
+      applyBlob(syncChoice.cloud.data);
       setLastCloudSync(Date.now());
     }
-    setPendingCloud(null);
+    setSyncChoice(null);
     setSyncBusy(false);
   };
-  // Download the copy that's about to be replaced, as a safety net, before newest-wins overwrites it.
-  const downloadOldCache = (pending) => {
+  // Optional safety-net download of either copy from the chooser.
+  const downloadCopy = (blob, tag) => {
     try {
-      const blob = pending.dir === "cloud-wins" ? pending.blob : pending.blob; // the older copy in both dirs
       const text = JSON.stringify(blob, null, 2);
       const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
       const a = document.createElement("a");
-      a.href = url; a.download = `clearmind-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.href = url; a.download = `clearmind-${tag}-${new Date().toISOString().slice(0, 10)}.json`;
       a.click(); URL.revokeObjectURL(url);
-    } catch (e) { pushToast("Could not export the old copy."); }
+    } catch (e) { pushToast("Could not export that copy."); }
   };
   const doSignIn = () => signInWithGoogle();
   const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); pushToast("Signed out — your data stays on this device."); };
@@ -1608,7 +1660,7 @@ export default function App() {
         onOpenExport={() => { setSettingsOpen(false); setExportOpen(true); }} onClose={() => setSettingsOpen(false)}
         syncEnabled={syncEnabled} session={session} syncBusy={syncBusy} lastCloudSync={lastCloudSync}
         onSignIn={doSignIn} onSignOut={doSignOut} />}
-      {pendingCloud && <ReconcileModal pending={pendingCloud} onExportOld={() => downloadOldCache(pendingCloud)} onContinue={resolvePending} />}
+      {syncChoice && <SyncChooserModal choice={syncChoice} onPick={chooseCopy} onDownload={downloadCopy} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
       {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
@@ -2907,27 +2959,51 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
   );
 }
 
-function ReconcileModal({ pending, onExportOld, onContinue }) {
-  const cloudWins = pending.dir === "cloud-wins";
-  const oldDate = pending.at ? new Date(pending.at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "an earlier time";
-  const newDate = pending.newAt ? new Date(pending.newAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "now";
+function SyncChooserModal({ choice, onPick, onDownload }) {
+  const { local, cloud } = choice;
+  // Pre-suggest the higher-XP copy (XP only climbs, so it's the more-progressed one).
+  const suggested = cloud.stats.xp > local.stats.xp ? "cloud" : "local";
+
+  const StatCard = ({ side, label, stats, blob, tag }) => {
+    const isSuggested = suggested === side;
+    return (
+      <div className="card" style={{ flex: 1, minWidth: 200, padding: 14, border: isSuggested ? "2px solid var(--pine)" : "1px solid var(--line)", position: "relative" }}>
+        {isSuggested && (
+          <span className="pill on" style={{ position: "absolute", top: -10, right: 12, fontSize: 10 }}>Suggested</span>
+        )}
+        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1, marginBottom: 8 }}>{label}</div>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 }}>
+          <span className="serif" style={{ fontSize: 24, lineHeight: 1 }}>Lv {stats.level}</span>
+          <span style={{ fontSize: 12.5, color: "var(--ink2)" }}>{stats.rank}</span>
+        </div>
+        <div style={{ display: "flex", gap: 14, margin: "10px 0", fontSize: 13 }}>
+          <div><div className="mono" style={{ fontSize: 16, color: "var(--amber)" }}>{stats.xp.toLocaleString()}</div><div className="mono" style={{ fontSize: 9.5, color: "var(--muted)" }}>XP</div></div>
+          <div><div className="mono" style={{ fontSize: 16, color: "var(--pine)" }}>{stats.gtd.toLocaleString()}<span className="gtd-glyph" style={{ fontSize: 11 }}> ₲</span></div><div className="mono" style={{ fontSize: 9.5, color: "var(--muted)" }}>CASH</div></div>
+        </div>
+        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>
+          {stats.items} open {stats.items === 1 ? "action" : "actions"}<br />
+          {stats.projects} active {stats.projects === 1 ? "project" : "projects"} · {stats.habits} {stats.habits === 1 ? "habit" : "habits"}
+        </div>
+        <button className={"btn btn-sm " + (isSuggested ? "btn-accent" : "")} style={{ width: "100%" }} onClick={() => onPick(side)}>
+          <Check size={13} /> Use this copy
+        </button>
+        <button className="btn btn-ghost btn-sm" style={{ width: "100%", marginTop: 6, fontSize: 11 }} onClick={() => onDownload(blob, tag)}>
+          <Download size={12} /> Back up first
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div className="overlay" style={{ alignItems: "center" }}>
-      <div className="card rise" style={{ width: 460, maxWidth: "100%", padding: 24 }}>
-        <div className="serif" style={{ fontSize: 20, marginBottom: 8 }}>Sync — newer copy found</div>
-        <p style={{ fontSize: 13.5, color: "var(--ink2)", lineHeight: 1.55, marginTop: 0 }}>
-          {cloudWins
-            ? <>Your account has a <b>newer</b> copy in the cloud (updated {newDate}) than what's on this device (from {oldDate}). Keeping the newer one will replace this device's copy.</>
-            : <>This device has a <b>newer</b> copy (modified {newDate}) than your account's cloud copy (from {oldDate}). Continuing will update the cloud with this device's version.</>}
+      <div className="card rise" style={{ width: 540, maxWidth: "100%", padding: 24 }}>
+        <div className="serif" style={{ fontSize: 21, marginBottom: 6 }}>Two copies found</div>
+        <p style={{ fontSize: 13, color: "var(--ink2)", lineHeight: 1.5, marginTop: 0, marginBottom: 16 }}>
+          This device and your account each have progress saved. Pick which one to keep — it'll become your synced copy everywhere. The one with more XP is suggested, but the choice is yours.
         </p>
-        <p style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
-          Before that, you can download the copy that's about to be replaced, just in case.
-        </p>
-        <div style={{ display: "flex", gap: 8, marginTop: 18, flexWrap: "wrap" }}>
-          <button className="btn btn-sm" onClick={onExportOld}><Download size={14} /> Export the old copy</button>
-          <button className="btn btn-accent btn-sm" style={{ marginLeft: "auto" }} onClick={onContinue}>
-            <Check size={14} /> {cloudWins ? "Use the newer cloud copy" : "Update cloud with this device"}
-          </button>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <StatCard side="local" label="THIS DEVICE" stats={local.stats} blob={local.snap} tag="device" />
+          <StatCard side="cloud" label="YOUR ACCOUNT (CLOUD)" stats={cloud.stats} blob={cloud.data} tag="cloud" />
         </div>
       </div>
     </div>
