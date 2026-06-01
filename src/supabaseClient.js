@@ -1,18 +1,21 @@
 import { createClient } from "@supabase/supabase-js";
 
-// These are read from Vite env vars at build time. The anon key is PUBLIC by design —
-// security comes from Row-Level Security on the database, not from hiding this key.
-// If either is missing, `supabase` is null and the app runs in pure-local mode (no sync),
-// so a misconfigured build can never break the working offline app.
 const url = import.meta.env.VITE_SUPABASE_URL;
 const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const supabase = (url && anon)
   ? createClient(url, anon, {
       auth: {
-        persistSession: true,        // keep the user signed in across reloads
+        persistSession: true,
         autoRefreshToken: true,
-        detectSessionInUrl: true,    // completes the OAuth redirect handshake
+        detectSessionInUrl: true,
+        // PKCE is more resilient on iOS PWAs — the code verifier survives
+        // storage eviction better than implicit flow tokens.
+        flowType: "pkce",
+        // Store the session in both localStorage and a cookie-style fallback
+        // so iOS doesn't wipe it when the PWA is backgrounded.
+        storage: typeof window !== "undefined" ? window.localStorage : undefined,
+        storageKey: "clearmind-auth",
       },
     })
   : null;

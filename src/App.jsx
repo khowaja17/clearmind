@@ -646,6 +646,7 @@ const STYLE = `
   animation:fade .18s ease; overflow:auto; }
 @keyframes fade { from{opacity:0} to{opacity:1} }
 @keyframes rise { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+@keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
 .rise { animation:rise .22s ease both; }
 .stagger > * { animation:rise .3s ease both; }
 
@@ -962,6 +963,7 @@ export default function App() {
   const [syncBusy, setSyncBusy] = useState(false);       // a cloud op is in flight
   const [lastCloudSync, setLastCloudSync] = useState(null); // timestamp of last successful cloud save/load
   const [syncChoice, setSyncChoice] = useState(null);       // {local:{snap,stats}, cloud:{data,stats}} when user must pick
+  const [syncStale, setSyncStale] = useState(false);        // true when local differs from cloud (refresh indicator)
   const [editId, setEditId] = useState(null);
   const [ctxMgrOpen, setCtxMgrOpen] = useState(false);
   const [openArea, setOpenArea] = useState(null);
@@ -1029,9 +1031,11 @@ export default function App() {
     (async () => {
       const sess = await getSession();
       if (sess) { needsReconcile.current = true; setSession(sess); }
-      unsub = onAuthChange((s) => {
+      unsub = onAuthChange((s, event) => {
         setSession((prev) => {
-          if (s && !prev) needsReconcile.current = true; // a real new sign-in
+          // TOKEN_REFRESHED is a silent background event — don't trigger a full reconcile,
+          // just update the session reference so pushCloud uses the fresh token.
+          if (s && !prev && event !== "TOKEN_REFRESHED") needsReconcile.current = true;
           return s;
         });
       });
@@ -1047,6 +1051,29 @@ export default function App() {
     reconcileOnSignIn(session);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, session]);
+
+  // ---- reconcile on every open, focus, and visibility change ----
+  // This is what makes changes from another device appear without signing out and back in.
+  // Throttled to once per 60s so rapid tab-switching doesn't hammer the database.
+  const lastFocusSync = useRef(0);
+  useEffect(() => {
+    if (!syncEnabled) return;
+    const doFocusSync = () => {
+      if (!session || !loaded) return;
+      const now = Date.now();
+      if (now - lastFocusSync.current < 60_000) return;
+      lastFocusSync.current = now;
+      reconcileOnSignIn(session);
+    };
+    const onVis = () => { if (document.visibilityState === "visible") doFocusSync(); };
+    window.addEventListener("focus", doFocusSync);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("focus", doFocusSync);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, loaded]);
 
   // push a loaded/migrated bundle into state
   function applyLoaded(d) {
@@ -1115,19 +1142,21 @@ export default function App() {
       // no/empty cloud, local has data → local wins, seed/repair cloud
       if (localFull) { await cloudSave(sess.user.id, localSnap); setLastCloudSync(Date.now()); }
       else setLastCloudSync(Date.now());
+      setSyncStale(false);
     } else if (cloudFull && !localFull) {
       // fresh device, cloud has data → pull silently
-      applyBlob(cloud.data); setLastCloudSync(Date.now());
+      applyBlob(cloud.data); setLastCloudSync(Date.now()); setSyncStale(false);
     } else if (cloudFull && localFull) {
       // both have data → if identical-enough by stats, just keep cloud; else ask the user
       const ls = statsOf(localSnap), cs = statsOf(cloud.data);
       if (ls.xp === cs.xp && ls.gtd === cs.gtd && ls.items === cs.items && ls.projects === cs.projects) {
-        setLastCloudSync(Date.now()); // effectively the same — no need to prompt
+        setLastCloudSync(Date.now()); setSyncStale(false); // same — no need to prompt
       } else {
+        setSyncStale(true); // show refresh icon in Settings until user picks
         setSyncChoice({ local: { snap: localSnap, stats: ls }, cloud: { data: cloud.data, stats: cs } });
       }
     } else {
-      setLastCloudSync(Date.now());
+      setLastCloudSync(Date.now()); setSyncStale(false);
     }
     setSyncBusy(false);
   };
@@ -1146,6 +1175,7 @@ export default function App() {
       setLastCloudSync(Date.now());
     }
     setSyncChoice(null);
+    setSyncStale(false);
     setSyncBusy(false);
   };
   // Optional safety-net download of either copy from the chooser.
@@ -1159,7 +1189,8 @@ export default function App() {
     } catch (e) { pushToast("Could not export that copy."); }
   };
   const doSignIn = () => signInWithGoogle();
-  const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); pushToast("Signed out — your data stays on this device."); };
+  const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); setSyncStale(false); pushToast("Signed out — your data stays on this device."); };
+  const manualSync = () => { if (session && loaded) { lastFocusSync.current = 0; reconcileOnSignIn(session); } };
 
   // ---- mark local modifications + debounced cloud push on any data change ----
   const syncTimer = useRef(null);
@@ -1659,7 +1690,7 @@ export default function App() {
       {settingsOpen && <SettingsModal meta={meta} onSaveName={(nm) => saveMeta({ ...meta, name: nm })}
         onOpenExport={() => { setSettingsOpen(false); setExportOpen(true); }} onClose={() => setSettingsOpen(false)}
         syncEnabled={syncEnabled} session={session} syncBusy={syncBusy} lastCloudSync={lastCloudSync}
-        onSignIn={doSignIn} onSignOut={doSignOut} />}
+        syncStale={syncStale} onSignIn={doSignIn} onSignOut={doSignOut} onManualSync={manualSync} />}
       {syncChoice && <SyncChooserModal choice={syncChoice} onPick={chooseCopy} onDownload={downloadCopy} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
       {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
@@ -2888,7 +2919,7 @@ function WhatsNewModal({ name, entries, onClose }) {
   );
 }
 
-function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, session, syncBusy, lastCloudSync, onSignIn, onSignOut }) {
+function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, session, syncBusy, lastCloudSync, syncStale, onSignIn, onSignOut, onManualSync }) {
   const [name, setName] = useState(meta.name || "");
   const started = meta.journeyStarted ? new Date(meta.journeyStarted).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) : null;
   const syncedStr = lastCloudSync ? new Date(lastCloudSync).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
@@ -2919,11 +2950,25 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
         ) : session ? (
           <div className="card" style={{ padding: 13, marginBottom: 16, background: "var(--paper2)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-              <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <Check size={16} color="#fbf9f4" />
-              </div>
+              {/* Checkmark when in sync, refresh button when stale or busy */}
+              {syncBusy ? (
+                <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--pine-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <RotateCcw size={15} color="var(--pine)" style={{ animation: "spin 1s linear infinite" }} />
+                </div>
+              ) : syncStale ? (
+                <button title="Copies differ — tap to review" onClick={onManualSync}
+                  style={{ width: 30, height: 30, borderRadius: 8, background: "var(--clay-soft)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <RotateCcw size={15} color="var(--clay)" />
+                </button>
+              ) : (
+                <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  <Check size={16} color="#fbf9f4" />
+                </div>
+              )}
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>Synced{syncBusy ? " · saving…" : ""}</div>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>
+                  {syncBusy ? "Syncing…" : syncStale ? "Out of sync — tap to review" : "In sync"}
+                </div>
                 <div className="mono" style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {session.user?.email}
                 </div>
@@ -2931,9 +2976,15 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
               <button className="btn btn-sm btn-ghost" onClick={onSignOut}>Sign out</button>
             </div>
             <div className="mono" style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.6 }}>
-              {syncedStr && <>Cloud updated {syncedStr}<br /></>}
+              {syncedStr && <>Last synced {syncedStr}<br /></>}
               {deviceStr && <>This device modified since {deviceStr}</>}
+              {!syncStale && <><br />Auto-syncs on open, focus, and tab switch.</>}
             </div>
+            {syncStale && (
+              <button className="btn btn-sm" style={{ marginTop: 10, width: "100%" }} onClick={onManualSync}>
+                <RotateCcw size={13} /> Review differences now
+              </button>
+            )}
           </div>
         ) : (
           <div style={{ marginBottom: 16 }}>
