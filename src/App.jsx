@@ -1021,13 +1021,15 @@ export default function App() {
   // Cloud is the single source of truth when signed in.
   //   • On sign-in / app-open: pull from cloud. Seed cloud if it's empty.
   //   • After any local change: push immediately (no debounce).
-  // ---- sync engine: higher XP wins, no prompts ever ----------------------
-  // Local cache gives instant display; cloud is authoritative.
-  // On every sync event, compare XP — whichever is higher wins automatically.
-  // Offline edits accumulate locally; when reconnecting, if local XP ≥ cloud XP
-  // those edits get pushed up (they represent more real work done).
+  // ---- sync engine: higher XP wins, no prompts, no loops -----------------
+  // Three rules that prevent the feedback loop:
+  //   1. applyBlob sets isApplying=true so the push-on-change effect skips,
+  //      breaking the pull→push→Realtime→pull cycle.
+  //   2. Equal XP means already in sync — do nothing (not "apply cloud").
+  //   3. Realtime uses the payload data directly — no re-fetch, no XP compare,
+  //      just apply what the other device already saved.
 
-  const xpOf   = (b) => (b?.game?.xp)  || 0;
+  const xpOf = (b) => (b?.game?.xp) || 0;
   const snapshot = () => ({ version: APP_VERSION, items, projects, habits, log, settings, areas, horizons, game, meta });
 
   function applyLoaded(d) {
@@ -1035,44 +1037,67 @@ export default function App() {
     setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
   }
 
+  // Guard: true while we're applying a cloud blob. The push-on-change effect
+  // checks this and skips, so a pull never causes a push.
+  const isApplying = useRef(false);
+
   const applyBlob = (blob) => {
     let b = { items: blob.items||[], projects: blob.projects||[], habits: blob.habits||[],
       log: blob.log||{}, settings: blob.settings||{ contexts: DEFAULT_CONTEXTS, lastReview: null },
       areas: blob.areas||[], horizons: blob.horizons||{ goals:[], vision:[], purpose:[] }, game: blob.game||game };
     const fromV = typeof blob.version === "number" ? blob.version : 0;
     if (fromV < APP_VERSION) b = runMigrations(b, fromV).data;
+    isApplying.current = true;
     saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits);
     saveLog(b.log); saveSettings(b.settings); saveAreas(b.areas);
     saveHorizons(b.horizons); saveGame(b.game);
     if (blob.meta) saveMeta({ ...blob.meta, version: APP_VERSION });
+    // React batches the setState calls above. isApplying resets after the
+    // next render so the push effect sees it correctly.
+    setTimeout(() => { isApplying.current = false; }, 0);
   };
 
-  // Core sync: compare XP, winner gets written everywhere. Silent, automatic.
+  // On open / focus / manual: compare XP, highest wins. Equal = already in sync.
   const syncWithCloud = async (sess) => {
     const s = sess || session;
     if (!syncEnabled || !s || !loaded) return;
     setSyncBusy(true);
     const cloud = await cloudLoad(s.user.id);
-    const localSnap = snapshot();
-    const localXP = xpOf(localSnap);
-    const cloudXP  = xpOf(cloud?.data);
+    const localXP = xpOf(snapshot());
+    const cloudXP = xpOf(cloud?.data);
     if (!cloud || localXP > cloudXP) {
-      // local wins — push it up (also covers: no cloud row yet, or offline edits accumulated)
-      if (localXP > 0) await cloudSave(s.user.id, localSnap);
-    } else {
-      // cloud wins or equal — apply cloud (covers: fresh device, another device did more work)
+      // local has more progress — push it up
+      if (localXP > 0) await cloudSave(s.user.id, snapshot());
+    } else if (cloudXP > localXP) {
+      // cloud has more progress — apply it (isApplying guard prevents re-push)
       applyBlob(cloud.data);
     }
+    // equal XP → already in sync, nothing to do
     setLastCloudSync(Date.now());
     setSyncBusy(false);
   };
 
-  // push immediately after any local change (no debounce)
+  // Realtime: another device saved. Use the payload data directly — no re-fetch,
+  // no XP comparison, just apply. The isApplying guard prevents this from
+  // triggering a push back to the cloud.
+  const applyRealtimeData = (data) => {
+    if (!data) return;
+    const remoteXP = xpOf(data);
+    const localXP  = xpOf(snapshot());
+    // Only apply if the remote copy has genuinely more progress
+    if (remoteXP > localXP) {
+      applyBlob(data);
+      setLastCloudSync(Date.now());
+    }
+    // If local XP is equal or higher, local is already up to date — ignore.
+  };
+
+  // Push immediately after any user-driven local change (skipped during applyBlob)
   const pushCloud = async (sess) => {
     const s = sess || session;
     if (!syncEnabled || !s || !loaded) return;
     const snap = snapshot();
-    if (xpOf(snap) === 0) return; // never push an empty/blank state
+    if (xpOf(snap) === 0) return;
     setSyncBusy(true);
     const ts = await cloudSave(s.user.id, snap);
     if (ts) setLastCloudSync(Date.now());
@@ -1082,7 +1107,7 @@ export default function App() {
   const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); };
   const manualSync = () => { if (session && loaded) syncWithCloud(session); };
 
-  // auth: restore session on load, listen for changes
+  // Auth: restore session, defer sync until local data is loaded
   const pendingSync = useRef(null);
   useEffect(() => {
     if (!syncEnabled) return;
@@ -1099,7 +1124,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // run sync once local data is loaded AND we have a session
   useEffect(() => {
     if (!syncEnabled || !loaded || !pendingSync.current) return;
     const sess = pendingSync.current;
@@ -1108,15 +1132,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, session]);
 
-  // realtime: another device pushed → sync immediately
+  // Realtime: another device saved → apply their data directly from payload
   useEffect(() => {
     if (!syncEnabled || !session || !loaded) return;
-    const unsub = subscribeRealtime(session.user.id, () => syncWithCloud(session));
+    const unsub = subscribeRealtime(session.user.id, (data) => {
+      applyRealtimeData(data);
+    });
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, loaded]);
 
-  // focus / visibility: sync on app foregrounding (10s gap)
+  // Focus / visibility: sync on foregrounding (10s gap)
   const lastSync = useRef(0);
   useEffect(() => {
     if (!syncEnabled) return;
@@ -1134,11 +1160,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, loaded]);
 
-  // push after any local data change
+  // Push after any user-driven data change (skipped when isApplying is true)
   const firstChange = useRef(true);
   useEffect(() => {
     if (!loaded) return;
     if (firstChange.current) { firstChange.current = false; return; }
+    if (isApplying.current) return; // cloud pull in progress — don't echo it back
     const stamped = { ...meta, updatedAt: Date.now() };
     setMeta(stamped); store.save(KEYS.meta, stamped);
     if (syncEnabled && session) pushCloud(session);
