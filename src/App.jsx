@@ -7,7 +7,7 @@ import {
   Archive, Lock, Link2, Compass, Mountain, Target, Radar, ShoppingBag, Skull, Crosshair, Shield, Menu
 } from "lucide-react";
 import { syncEnabled } from "./supabaseClient.js";
-import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave, subscribeToRemoteChanges } from "./cloudSync.js";
+import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave, subscribeRealtime } from "./cloudSync.js";
 
 /* ============================================================================
    STORAGE SEAM
@@ -959,11 +959,9 @@ export default function App() {
   const [expanded, setExpanded] = useState({});
   const [exportOpen, setExportOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [session, setSession] = useState(null);          // Supabase auth session or null
-  const [syncBusy, setSyncBusy] = useState(false);       // a cloud op is in flight
-  const [lastCloudSync, setLastCloudSync] = useState(null); // timestamp of last successful cloud save/load
-  const [syncChoice, setSyncChoice] = useState(null);       // {local:{snap,stats}, cloud:{data,stats}} when user must pick
-  const [syncStale, setSyncStale] = useState(false);        // true when local differs from cloud (refresh indicator)
+  const [session, setSession] = useState(null);
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [lastCloudSync, setLastCloudSync] = useState(null);
   const [editId, setEditId] = useState(null);
   const [ctxMgrOpen, setCtxMgrOpen] = useState(false);
   const [openArea, setOpenArea] = useState(null);
@@ -1019,222 +1017,134 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ---- auth: pick up existing session, then listen for sign-in/out ----
-  // IMPORTANT: we do NOT reconcile here. Reconciliation must wait until local data has
-  // finished loading (the `loaded` flag), otherwise we'd snapshot empty initial state and
-  // push it to the cloud. We just record the session + a flag that a reconcile is needed;
-  // a separate effect below runs it once both session and loaded are true.
-  const needsReconcile = useRef(false);
+  // ---- simple sync engine ------------------------------------------------
+  // Cloud is the single source of truth when signed in.
+  //   • On sign-in / app-open: pull from cloud. Seed cloud if it's empty.
+  //   • After any local change: push immediately (no debounce).
+  // ---- sync engine: higher XP wins, no prompts ever ----------------------
+  // Local cache gives instant display; cloud is authoritative.
+  // On every sync event, compare XP — whichever is higher wins automatically.
+  // Offline edits accumulate locally; when reconnecting, if local XP ≥ cloud XP
+  // those edits get pushed up (they represent more real work done).
+
+  const xpOf   = (b) => (b?.game?.xp)  || 0;
+  const snapshot = () => ({ version: APP_VERSION, items, projects, habits, log, settings, areas, horizons, game, meta });
+
+  function applyLoaded(d) {
+    setItems(d.items); setProjects(d.projects); setHabits(d.habits); setLog(d.log);
+    setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
+  }
+
+  const applyBlob = (blob) => {
+    let b = { items: blob.items||[], projects: blob.projects||[], habits: blob.habits||[],
+      log: blob.log||{}, settings: blob.settings||{ contexts: DEFAULT_CONTEXTS, lastReview: null },
+      areas: blob.areas||[], horizons: blob.horizons||{ goals:[], vision:[], purpose:[] }, game: blob.game||game };
+    const fromV = typeof blob.version === "number" ? blob.version : 0;
+    if (fromV < APP_VERSION) b = runMigrations(b, fromV).data;
+    saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits);
+    saveLog(b.log); saveSettings(b.settings); saveAreas(b.areas);
+    saveHorizons(b.horizons); saveGame(b.game);
+    if (blob.meta) saveMeta({ ...blob.meta, version: APP_VERSION });
+  };
+
+  // Core sync: compare XP, winner gets written everywhere. Silent, automatic.
+  const syncWithCloud = async (sess) => {
+    const s = sess || session;
+    if (!syncEnabled || !s || !loaded) return;
+    setSyncBusy(true);
+    const cloud = await cloudLoad(s.user.id);
+    const localSnap = snapshot();
+    const localXP = xpOf(localSnap);
+    const cloudXP  = xpOf(cloud?.data);
+    if (!cloud || localXP > cloudXP) {
+      // local wins — push it up (also covers: no cloud row yet, or offline edits accumulated)
+      if (localXP > 0) await cloudSave(s.user.id, localSnap);
+    } else {
+      // cloud wins or equal — apply cloud (covers: fresh device, another device did more work)
+      applyBlob(cloud.data);
+    }
+    setLastCloudSync(Date.now());
+    setSyncBusy(false);
+  };
+
+  // push immediately after any local change (no debounce)
+  const pushCloud = async (sess) => {
+    const s = sess || session;
+    if (!syncEnabled || !s || !loaded) return;
+    const snap = snapshot();
+    if (xpOf(snap) === 0) return; // never push an empty/blank state
+    setSyncBusy(true);
+    const ts = await cloudSave(s.user.id, snap);
+    if (ts) setLastCloudSync(Date.now());
+    setSyncBusy(false);
+  };
+
+  const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); };
+  const manualSync = () => { if (session && loaded) syncWithCloud(session); };
+
+  // auth: restore session on load, listen for changes
+  const pendingSync = useRef(null);
   useEffect(() => {
     if (!syncEnabled) return;
     let unsub = () => {};
     (async () => {
       const sess = await getSession();
-      if (sess) { needsReconcile.current = true; setSession(sess); }
+      if (sess) { pendingSync.current = sess; setSession(sess); }
       unsub = onAuthChange((s, event) => {
-        setSession((prev) => {
-          // TOKEN_REFRESHED is a silent background event — don't trigger a full reconcile,
-          // just update the session reference so pushCloud uses the fresh token.
-          if (s && !prev && event !== "TOKEN_REFRESHED") needsReconcile.current = true;
-          return s;
-        });
+        setSession(s);
+        if (s && event !== "TOKEN_REFRESHED") pendingSync.current = s;
       });
     })();
     return () => unsub();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Run the deferred reconcile exactly once local load is complete AND we have a session.
+  // run sync once local data is loaded AND we have a session
   useEffect(() => {
-    if (!syncEnabled || !loaded || !session || !needsReconcile.current) return;
-    needsReconcile.current = false;
-    reconcileOnSignIn(session);
+    if (!syncEnabled || !loaded || !pendingSync.current) return;
+    const sess = pendingSync.current;
+    pendingSync.current = null;
+    syncWithCloud(sess);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded, session]);
 
-  // ---- reconcile on every open, focus, and visibility change ----
-  // This is what makes changes from another device appear without signing out and back in.
-  // Throttled to once per 60s so rapid tab-switching doesn't hammer the database.
-  // Reset the focus-sync throttle whenever a real new session arrives so we
-  // don't skip the first reconcile after sign-in.
-  const lastFocusSync = useRef(0);
-  useEffect(() => {
-    if (!syncEnabled) return;
-    const doFocusSync = () => {
-      if (!session || !loaded) return;
-      const now = Date.now();
-      if (now - lastFocusSync.current < 15_000) return;
-      lastFocusSync.current = now;
-      reconcileOnSignIn(session);
-    };
-    const onVis = () => { if (document.visibilityState === "visible") doFocusSync(); };
-    window.addEventListener("focus", doFocusSync);
-    document.addEventListener("visibilitychange", onVis);
-    return () => {
-      window.removeEventListener("focus", doFocusSync);
-      document.removeEventListener("visibilitychange", onVis);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, loaded]);
-
-  // ---- Realtime subscription ----
-  // When another device saves to the cloud, Supabase pushes a notification here
-  // via WebSocket — we then pull the fresh row and run the same stat-comparison
-  // reconcile. The justWrote guard suppresses the event that fires when *this*
-  // device is the one that just wrote (we'd reconcile ourselves unnecessarily).
-  const justWrote = useRef(false);
+  // realtime: another device pushed → sync immediately
   useEffect(() => {
     if (!syncEnabled || !session || !loaded) return;
-    const unsub = subscribeToRemoteChanges(session.user.id, (_payload) => {
-      if (justWrote.current) {
-        // This event was triggered by our own pushCloud — ignore it.
-        justWrote.current = false;
-        return;
-      }
-      // Another device wrote. Pull the latest and reconcile.
-      console.log("[clearmind] realtime: remote change detected — reconciling");
-      lastFocusSync.current = 0; // bypass throttle for realtime events
-      reconcileOnSignIn(session);
-    });
+    const unsub = subscribeRealtime(session.user.id, () => syncWithCloud(session));
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, loaded]);
 
-  // push a loaded/migrated bundle into state
-  function applyLoaded(d) {
-    setItems(d.items); setProjects(d.projects); setHabits(d.habits); setLog(d.log);
-    setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
-  }
-
-  // ---- cloud sync engine (no-ops cleanly when sync isn't configured) ----
-  // Bundle the entire app state into one blob — same shape as export, carrying version+meta.
-  const snapshot = () => ({
-    version: APP_VERSION, items, projects, habits, log, settings, areas, horizons, game, meta,
-  });
-  // Write a cloud blob into both React state and localStorage so the local cache matches cloud.
-  // Runs migrations if the cloud copy predates this client (e.g. another device on an older app).
-  const applyBlob = (blob) => {
-    let b = {
-      items: blob.items || [], projects: blob.projects || [], habits: blob.habits || [],
-      log: blob.log || {}, settings: blob.settings || { contexts: DEFAULT_CONTEXTS, lastReview: null },
-      areas: blob.areas || [], horizons: blob.horizons || { goals: [], vision: [], purpose: [] },
-      game: blob.game || game,
+  // focus / visibility: sync on app foregrounding (10s gap)
+  const lastSync = useRef(0);
+  useEffect(() => {
+    if (!syncEnabled) return;
+    const doSync = () => {
+      if (!session || !loaded) return;
+      const now = Date.now();
+      if (now - lastSync.current < 10_000) return;
+      lastSync.current = now;
+      syncWithCloud(session);
     };
-    const fromV = typeof blob.version === "number" ? blob.version : 0;
-    if (fromV < APP_VERSION) b = runMigrations(b, fromV).data;
-    saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits); saveLog(b.log);
-    saveSettings(b.settings); saveAreas(b.areas); saveHorizons(b.horizons); saveGame(b.game);
-    if (blob.meta) saveMeta({ ...blob.meta, version: APP_VERSION });
-  };
+    const onVis = () => { if (document.visibilityState === "visible") doSync(); };
+    window.addEventListener("focus", doSync);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("focus", doSync); document.removeEventListener("visibilitychange", onVis); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, loaded]);
 
-  // How "full" a state blob is — guards against an empty snapshot clobbering real data.
-  const blobFullness = (b) => {
-    if (!b) return 0;
-    const items = (b.items || []).length;
-    const projects = (b.projects || []).length;
-    const habits = (b.habits || []).length;
-    const areas = (b.areas || []).length;
-    const logs = b.log ? Object.keys(b.log).length : 0;
-    const xp = (b.game && b.game.xp) || 0;
-    return items + projects + habits + areas + logs + (xp > 0 ? 1 : 0);
-  };
-  const isMeaningful = (b) => blobFullness(b) > 0;
-
-  // Push current state to the cloud — called after key actions, only when signed in.
-  // Never pushes an empty snapshot (prevents wiping the cloud during an early/blank render).
-  const pushCloud = async () => {
-    if (!syncEnabled || !session) return;
-    const snap = snapshot();
-    if (!isMeaningful(snap)) return;
-    setSyncBusy(true);
-    justWrote.current = true; // tell the realtime listener this echo is ours
-    const ok = await cloudSave(session.user.id, snap);
-    if (ok) setLastCloudSync(Date.now());
-    else justWrote.current = false; // save failed — don't suppress the next event
-    setSyncBusy(false);
-  };
-
-  // Reconcile local vs cloud on sign-in. Empty-vs-data resolves silently. When BOTH have
-  // real data, surface a chooser showing each copy's stats (level/xp/₲/counts) and let the
-  // user pick — no timestamps. Higher XP is pre-suggested since XP only ever climbs.
-  const reconcileOnSignIn = async (sess) => {
-    if (!syncEnabled || !sess) return;
-    setSyncBusy(true);
-    const cloud = await cloudLoad(sess.user.id);
-    const localSnap = snapshot();
-    const localFull = isMeaningful(localSnap);
-    const cloudFull = cloud && isMeaningful(cloud.data);
-
-    if (!cloud || (!cloudFull && localFull)) {
-      // no/empty cloud, local has data → local wins, seed/repair cloud
-      if (localFull) { await cloudSave(sess.user.id, localSnap); setLastCloudSync(Date.now()); }
-      else setLastCloudSync(Date.now());
-      setSyncStale(false);
-    } else if (cloudFull && !localFull) {
-      // fresh device, cloud has data → pull silently
-      applyBlob(cloud.data); setLastCloudSync(Date.now()); setSyncStale(false);
-    } else if (cloudFull && localFull) {
-      // both have data → if identical-enough by stats, just keep cloud; else ask the user
-      const ls = statsOf(localSnap), cs = statsOf(cloud.data);
-      if (ls.xp === cs.xp && ls.gtd === cs.gtd && ls.items === cs.items && ls.projects === cs.projects) {
-        setLastCloudSync(Date.now()); setSyncStale(false); // same — no need to prompt
-      } else {
-        setSyncStale(true); // show refresh icon in Settings until user picks
-        setSyncChoice({ local: { snap: localSnap, stats: ls }, cloud: { data: cloud.data, stats: cs } });
-      }
-    } else {
-      setLastCloudSync(Date.now()); setSyncStale(false);
-    }
-    setSyncBusy(false);
-  };
-
-  // User picked a copy in the chooser. "local" keeps this device's data and pushes it to
-  // the cloud; "cloud" pulls the cloud copy down onto this device. Either way, both ends end
-  // up matching the chosen copy. The non-chosen copy is offered as a backup download first.
-  const chooseCopy = async (which) => {
-    if (!syncChoice || !session) { setSyncChoice(null); return; }
-    setSyncBusy(true);
-    if (which === "local") {
-      await cloudSave(session.user.id, syncChoice.local.snap);
-      setLastCloudSync(Date.now());
-    } else {
-      applyBlob(syncChoice.cloud.data);
-      setLastCloudSync(Date.now());
-    }
-    setSyncChoice(null);
-    setSyncStale(false);
-    setSyncBusy(false);
-  };
-  // Optional safety-net download of either copy from the chooser.
-  const downloadCopy = (blob, tag) => {
-    try {
-      const text = JSON.stringify(blob, null, 2);
-      const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
-      const a = document.createElement("a");
-      a.href = url; a.download = `clearmind-${tag}-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click(); URL.revokeObjectURL(url);
-    } catch (e) { pushToast("Could not export that copy."); }
-  };
-  const doSignIn = () => signInWithGoogle();
-  const doSignOut = async () => { await signOut(); setSession(null); setLastCloudSync(null); setSyncStale(false); pushToast("Signed out — your data stays on this device."); };
-  const manualSync = () => { if (session && loaded) { lastFocusSync.current = 0; reconcileOnSignIn(session); } };
-
-  // ---- mark local modifications + debounced cloud push on any data change ----
-  const syncTimer = useRef(null);
+  // push after any local data change
   const firstChange = useRef(true);
   useEffect(() => {
     if (!loaded) return;
-    if (firstChange.current) { firstChange.current = false; return; } // ignore initial load
-    const ts = Date.now();
-    const stamped = { ...meta, updatedAt: ts };
+    if (firstChange.current) { firstChange.current = false; return; }
+    const stamped = { ...meta, updatedAt: Date.now() };
     setMeta(stamped); store.save(KEYS.meta, stamped);
-    if (syncEnabled && session) {
-      if (syncTimer.current) clearTimeout(syncTimer.current);
-      syncTimer.current = setTimeout(() => { pushCloud(); }, 3000);
-    }
-    return () => { if (syncTimer.current) clearTimeout(syncTimer.current); };
+    if (syncEnabled && session) pushCloud(session);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, projects, habits, log, settings, areas, horizons, game]);
+
 
   // ---- persisted setters ----
   const saveItems = (v) => { setItems(v); store.save(KEYS.items, v); };
@@ -1606,6 +1516,31 @@ export default function App() {
   ];
 
   return (
+    <>
+    {/* Sign-in gate: no app without an account */}
+    {syncEnabled && !session && (
+      <div className="gtd app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100dvh", flexDirection: "column", gap: 20 }}>
+        <style>{STYLE}</style>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Sparkles size={24} color="#fbf9f4" />
+          </div>
+          <div>
+            <div className="serif" style={{ fontSize: 26, lineHeight: 1 }}>Clearmind</div>
+            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1 }}>GTD · SURVIVAL</div>
+          </div>
+        </div>
+        <p style={{ fontSize: 14, color: "var(--ink2)", textAlign: "center", maxWidth: 280, margin: 0, lineHeight: 1.5 }}>
+          Sign in to sync your settlement across every device.
+        </p>
+        {syncBusy
+          ? <div className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>Signing in…</div>
+          : <button className="btn btn-accent" style={{ minWidth: 220 }} onClick={() => signInWithGoogle()}>
+              <Link2 size={16} /> Sign in with Google
+            </button>}
+      </div>
+    )}
+    {(!syncEnabled || session) && (
     <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "")}
       style={!game.inSiege && themeById(game.equipped?.theme).vars ? themeById(game.equipped.theme).vars : undefined}>
       <style>{STYLE}</style>
@@ -1717,11 +1652,12 @@ export default function App() {
       {settingsOpen && <SettingsModal meta={meta} onSaveName={(nm) => saveMeta({ ...meta, name: nm })}
         onOpenExport={() => { setSettingsOpen(false); setExportOpen(true); }} onClose={() => setSettingsOpen(false)}
         syncEnabled={syncEnabled} session={session} syncBusy={syncBusy} lastCloudSync={lastCloudSync}
-        syncStale={syncStale} onSignIn={doSignIn} onSignOut={doSignOut} onManualSync={manualSync} />}
-      {syncChoice && <SyncChooserModal choice={syncChoice} onPick={chooseCopy} onDownload={downloadCopy} />}
+        onSignOut={doSignOut} onManualSync={manualSync} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
       {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
     </div>
+    )}
+    </>
   );
 }
 
@@ -2946,11 +2882,10 @@ function WhatsNewModal({ name, entries, onClose }) {
   );
 }
 
-function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, session, syncBusy, lastCloudSync, syncStale, onSignIn, onSignOut, onManualSync }) {
+function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, session, syncBusy, lastCloudSync, onSignOut, onManualSync }) {
   const [name, setName] = useState(meta.name || "");
   const started = meta.journeyStarted ? new Date(meta.journeyStarted).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) : null;
   const syncedStr = lastCloudSync ? new Date(lastCloudSync).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
-  const deviceStr = meta.updatedAt ? new Date(meta.updatedAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : null;
   return (
     <div className="overlay" onClick={onClose}>
       <div className="card rise" style={{ width: 480, maxWidth: "100%", padding: 22 }} onClick={(e) => e.stopPropagation()}>
@@ -2959,7 +2894,6 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
           <button className="btn btn-ghost" onClick={onClose}><X size={16} /></button>
         </div>
 
-        {/* Profile */}
         <div className="subq" style={{ marginBottom: 7 }}>PROFILE</div>
         <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
           <input className="input" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
@@ -2967,7 +2901,6 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
         </div>
         {started && <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 16 }}>Surviving since {started}</div>}
 
-        {/* Account / cloud sync */}
         <div className="subq" style={{ marginBottom: 7 }}>ACCOUNT &amp; SYNC</div>
         {!syncEnabled ? (
           <div className="card" style={{ padding: 12, marginBottom: 16, display: "flex", alignItems: "center", gap: 10, background: "var(--paper2)" }}>
@@ -2977,41 +2910,24 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
         ) : session ? (
           <div className="card" style={{ padding: 13, marginBottom: 16, background: "var(--paper2)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-              {/* Checkmark when in sync, refresh button when stale or busy */}
-              {syncBusy ? (
-                <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--pine-soft)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <RotateCcw size={15} color="var(--pine)" style={{ animation: "spin 1s linear infinite" }} />
-                </div>
-              ) : syncStale ? (
-                <button title="Copies differ — tap to review" onClick={onManualSync}
-                  style={{ width: 30, height: 30, borderRadius: 8, background: "var(--clay-soft)", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <RotateCcw size={15} color="var(--clay)" />
-                </button>
-              ) : (
-                <div style={{ width: 30, height: 30, borderRadius: 8, background: "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  <Check size={16} color="#fbf9f4" />
-                </div>
-              )}
+              <div style={{ width: 30, height: 30, borderRadius: 8, background: syncBusy ? "var(--pine-soft)" : "var(--pine)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                {syncBusy
+                  ? <RotateCcw size={15} color="var(--pine)" style={{ animation: "spin 1s linear infinite" }} />
+                  : <Check size={16} color="#fbf9f4" />}
+              </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 500 }}>
-                  {syncBusy ? "Syncing…" : syncStale ? "Out of sync — tap to review" : "In sync"}
-                </div>
-                <div className="mono" style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {session.user?.email}
-                </div>
+                <div style={{ fontSize: 13, fontWeight: 500 }}>{syncBusy ? "Syncing…" : "In sync"}</div>
+                <div className="mono" style={{ fontSize: 10, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.user?.email}</div>
               </div>
               <button className="btn btn-sm btn-ghost" onClick={onSignOut}>Sign out</button>
             </div>
             <div className="mono" style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.6 }}>
-              {syncedStr && <>Last synced {syncedStr}<br /></>}
-              {deviceStr && <>This device modified since {deviceStr}</>}
-              {!syncStale && <><br />Auto-syncs on open, focus, and tab switch.</>}
+              {syncedStr ? <>Last synced {syncedStr}</> : "Not yet synced this session"}
+              <br />Syncs on open, focus change, and device wake.
             </div>
-            {syncStale && (
-              <button className="btn btn-sm" style={{ marginTop: 10, width: "100%" }} onClick={onManualSync}>
-                <RotateCcw size={13} /> Review differences now
-              </button>
-            )}
+            <button className="btn btn-sm" style={{ marginTop: 10, width: "100%" }} onClick={onManualSync} disabled={syncBusy}>
+              <RotateCcw size={13} /> Sync now
+            </button>
           </div>
         ) : (
           <div style={{ marginBottom: 16 }}>
@@ -3019,12 +2935,11 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
               <Link2 size={15} /> Sign in with Google to sync
             </button>
             <div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
-              Optional. Sign in to sync progress across your devices. Your data stays on this device either way.
+              Optional. Sign in to sync across your devices. Your data stays here either way.
             </div>
           </div>
         )}
 
-        {/* Data */}
         <div className="subq" style={{ marginBottom: 7 }}>DATA</div>
         <button className="btn btn-sm" style={{ width: "100%", justifyContent: "flex-start" }} onClick={onOpenExport}>
           <Download size={14} /> Export / Import your data
@@ -3037,56 +2952,6 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
   );
 }
 
-function SyncChooserModal({ choice, onPick, onDownload }) {
-  const { local, cloud } = choice;
-  // Pre-suggest the higher-XP copy (XP only climbs, so it's the more-progressed one).
-  const suggested = cloud.stats.xp > local.stats.xp ? "cloud" : "local";
-
-  const StatCard = ({ side, label, stats, blob, tag }) => {
-    const isSuggested = suggested === side;
-    return (
-      <div className="card" style={{ flex: 1, minWidth: 200, padding: 14, border: isSuggested ? "2px solid var(--pine)" : "1px solid var(--line)", position: "relative" }}>
-        {isSuggested && (
-          <span className="pill on" style={{ position: "absolute", top: -10, right: 12, fontSize: 10 }}>Suggested</span>
-        )}
-        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1, marginBottom: 8 }}>{label}</div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 }}>
-          <span className="serif" style={{ fontSize: 24, lineHeight: 1 }}>Lv {stats.level}</span>
-          <span style={{ fontSize: 12.5, color: "var(--ink2)" }}>{stats.rank}</span>
-        </div>
-        <div style={{ display: "flex", gap: 14, margin: "10px 0", fontSize: 13 }}>
-          <div><div className="mono" style={{ fontSize: 16, color: "var(--amber)" }}>{stats.xp.toLocaleString()}</div><div className="mono" style={{ fontSize: 9.5, color: "var(--muted)" }}>XP</div></div>
-          <div><div className="mono" style={{ fontSize: 16, color: "var(--pine)" }}>{stats.gtd.toLocaleString()}<span className="gtd-glyph" style={{ fontSize: 11 }}> ₲</span></div><div className="mono" style={{ fontSize: 9.5, color: "var(--muted)" }}>CASH</div></div>
-        </div>
-        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>
-          {stats.items} open {stats.items === 1 ? "action" : "actions"}<br />
-          {stats.projects} active {stats.projects === 1 ? "project" : "projects"} · {stats.habits} {stats.habits === 1 ? "habit" : "habits"}
-        </div>
-        <button className={"btn btn-sm " + (isSuggested ? "btn-accent" : "")} style={{ width: "100%" }} onClick={() => onPick(side)}>
-          <Check size={13} /> Use this copy
-        </button>
-        <button className="btn btn-ghost btn-sm" style={{ width: "100%", marginTop: 6, fontSize: 11 }} onClick={() => onDownload(blob, tag)}>
-          <Download size={12} /> Back up first
-        </button>
-      </div>
-    );
-  };
-
-  return (
-    <div className="overlay" style={{ alignItems: "center" }}>
-      <div className="card rise" style={{ width: 540, maxWidth: "100%", padding: 24 }}>
-        <div className="serif" style={{ fontSize: 21, marginBottom: 6 }}>Two copies found</div>
-        <p style={{ fontSize: 13, color: "var(--ink2)", lineHeight: 1.5, marginTop: 0, marginBottom: 16 }}>
-          This device and your account each have progress saved. Pick which one to keep — it'll become your synced copy everywhere. The one with more XP is suggested, but the choice is yours.
-        </p>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <StatCard side="local" label="THIS DEVICE" stats={local.stats} blob={local.snap} tag="device" />
-          <StatCard side="cloud" label="YOUR ACCOUNT (CLOUD)" stats={cloud.stats} blob={cloud.data} tag="cloud" />
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function ExportModal({ text, onClose, onImport }) {
   const [tab, setTab] = useState("export");

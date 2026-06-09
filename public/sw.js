@@ -1,6 +1,6 @@
 // Clearmind service worker — caches the app shell so it loads offline and feels native.
 // Bump CACHE version whenever you ship a new build to force clients to refresh.
-const CACHE = "clearmind-v10";
+const CACHE = "clearmind-v11";
 
 // Precache the entry document; built JS/CSS are cached on first fetch (runtime caching)
 // because their hashed filenames change every build.

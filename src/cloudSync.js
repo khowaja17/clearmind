@@ -1,15 +1,14 @@
 import { supabase } from "./supabaseClient.js";
 
-// ---- auth ----
+// ---- auth ----------------------------------------------------------------
 
 export async function getSession() {
   if (!supabase) return null;
-  // Try the stored session first. If stale (common on iOS after backgrounding),
-  // attempt a silent refresh before giving up and showing the sign-in button.
   const { data } = await supabase.auth.getSession();
   if (data.session) return data.session;
-  const { data: refreshed } = await supabase.auth.refreshSession();
-  return refreshed?.session || null;
+  // Token may be stale (common on iOS after backgrounding) — try a silent refresh.
+  const { data: r } = await supabase.auth.refreshSession();
+  return r?.session || null;
 }
 
 export async function signInWithGoogle() {
@@ -35,7 +34,7 @@ export function onAuthChange(cb) {
   return () => data.subscription.unsubscribe();
 }
 
-// ---- data ----
+// ---- data ----------------------------------------------------------------
 
 export async function cloudLoad(userId) {
   if (!supabase || !userId) return null;
@@ -44,58 +43,41 @@ export async function cloudLoad(userId) {
     .select("data, updated_at")
     .eq("user_id", userId)
     .maybeSingle();
-  if (error) { console.warn("cloudLoad error", error.message); return null; }
+  if (error) { console.warn("[clearmind] cloudLoad:", error.message); return null; }
   return data || null;
 }
 
 export async function cloudSave(userId, blob) {
-  if (!supabase || !userId) return false;
+  if (!supabase || !userId) return null;
+  const ts = new Date().toISOString();
   const { error } = await supabase
     .from("app_state")
     .upsert(
-      { user_id: userId, data: blob, updated_at: new Date().toISOString() },
+      { user_id: userId, data: blob, updated_at: ts },
       { onConflict: "user_id" }
     );
-  if (error) { console.warn("cloudSave error", error.message); return false; }
-  return true;
+  if (error) { console.warn("[clearmind] cloudSave:", error.message); return null; }
+  return ts; // return the timestamp we wrote so callers can track it
 }
 
-// ---- realtime ----
-// Subscribes to INSERT/UPDATE on the user's own app_state row.
-// Calls onRemoteChange() whenever another device writes to the cloud.
-// Returns an unsubscribe function.
-//
-// Why filter server-side? Without a user_id filter, every subscriber receives
-// every user's row changes (all 10 of your testers). The filter pushes
-// the predicate into Postgres so only the matching row fires the event.
-// Supabase requires the Realtime toggle enabled on the table (done in dashboard).
-export function subscribeToRemoteChanges(userId, onRemoteChange) {
+// ---- realtime ------------------------------------------------------------
+// Subscribe to changes on this user's row. Calls cb(newData, updatedAt)
+// whenever another device writes. Returns unsubscribe fn.
+export function subscribeRealtime(userId, cb) {
   if (!supabase || !userId) return () => {};
-
   const channel = supabase
-    .channel(`app_state_${userId}`)
-    .on(
-      "postgres_changes",
-      {
-        event: "*",              // INSERT and UPDATE both trigger a full re-pull
-        schema: "public",
-        table: "app_state",
-        filter: `user_id=eq.${userId}`,
-      },
-      (payload) => {
-        // payload.new contains the fresh row straight from Postgres.
-        // We pass the whole payload so the caller can decide what to do with it.
-        onRemoteChange(payload);
-      }
-    )
+    .channel(`appstate_${userId}`)
+    .on("postgres_changes", {
+      event: "*",
+      schema: "public",
+      table: "app_state",
+      filter: `user_id=eq.${userId}`,
+    }, (payload) => {
+      const row = payload.new;
+      if (row && row.data) cb(row.data, row.updated_at);
+    })
     .subscribe((status) => {
-      if (status === "SUBSCRIBED") {
-        console.log("[clearmind] realtime: subscribed for", userId);
-      }
-      if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-        console.warn("[clearmind] realtime:", status, "— will rely on focus-sync fallback");
-      }
+      console.log("[clearmind] realtime:", status);
     });
-
-  return () => { supabase.removeChannel(channel); };
+  return () => supabase.removeChannel(channel);
 }
