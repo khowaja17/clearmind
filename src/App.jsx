@@ -7,7 +7,7 @@ import {
   Archive, Lock, Link2, Compass, Mountain, Target, Radar, ShoppingBag, Skull, Crosshair, Shield, Menu
 } from "lucide-react";
 import { syncEnabled } from "./supabaseClient.js";
-import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave } from "./cloudSync.js";
+import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave, subscribeToRemoteChanges } from "./cloudSync.js";
 
 /* ============================================================================
    STORAGE SEAM
@@ -1055,13 +1055,15 @@ export default function App() {
   // ---- reconcile on every open, focus, and visibility change ----
   // This is what makes changes from another device appear without signing out and back in.
   // Throttled to once per 60s so rapid tab-switching doesn't hammer the database.
+  // Reset the focus-sync throttle whenever a real new session arrives so we
+  // don't skip the first reconcile after sign-in.
   const lastFocusSync = useRef(0);
   useEffect(() => {
     if (!syncEnabled) return;
     const doFocusSync = () => {
       if (!session || !loaded) return;
       const now = Date.now();
-      if (now - lastFocusSync.current < 60_000) return;
+      if (now - lastFocusSync.current < 15_000) return;
       lastFocusSync.current = now;
       reconcileOnSignIn(session);
     };
@@ -1072,6 +1074,29 @@ export default function App() {
       window.removeEventListener("focus", doFocusSync);
       document.removeEventListener("visibilitychange", onVis);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, loaded]);
+
+  // ---- Realtime subscription ----
+  // When another device saves to the cloud, Supabase pushes a notification here
+  // via WebSocket — we then pull the fresh row and run the same stat-comparison
+  // reconcile. The justWrote guard suppresses the event that fires when *this*
+  // device is the one that just wrote (we'd reconcile ourselves unnecessarily).
+  const justWrote = useRef(false);
+  useEffect(() => {
+    if (!syncEnabled || !session || !loaded) return;
+    const unsub = subscribeToRemoteChanges(session.user.id, (_payload) => {
+      if (justWrote.current) {
+        // This event was triggered by our own pushCloud — ignore it.
+        justWrote.current = false;
+        return;
+      }
+      // Another device wrote. Pull the latest and reconcile.
+      console.log("[clearmind] realtime: remote change detected — reconciling");
+      lastFocusSync.current = 0; // bypass throttle for realtime events
+      reconcileOnSignIn(session);
+    });
+    return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, loaded]);
 
@@ -1120,10 +1145,12 @@ export default function App() {
   const pushCloud = async () => {
     if (!syncEnabled || !session) return;
     const snap = snapshot();
-    if (!isMeaningful(snap)) return; // nothing real to save yet
+    if (!isMeaningful(snap)) return;
     setSyncBusy(true);
+    justWrote.current = true; // tell the realtime listener this echo is ours
     const ok = await cloudSave(session.user.id, snap);
     if (ok) setLastCloudSync(Date.now());
+    else justWrote.current = false; // save failed — don't suppress the next event
     setSyncBusy(false);
   };
 
