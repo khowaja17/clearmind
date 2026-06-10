@@ -73,7 +73,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 8;
+const APP_VERSION = 10;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -146,11 +146,23 @@ const MIGRATIONS = {
   },
   8: {
     notes: [
-      "Cloud sync is here — sign in with Google in Settings to keep your settlement in step across devices.",
-      "Sign-in is optional; the app still works fully offline and on this device alone.",
-      "When a newer copy is found on another device, Clearmind asks before replacing — and lets you export the old copy first.",
+      "Cloud sync arrived — sign in with Google in Settings to keep your settlement in step across devices.",
+      "Sign-in is now required to use the app.",
+      "Higher XP always wins automatically when two copies exist — no prompts, no chooser.",
     ],
-    // additive: sync stores the same state blob; meta.updatedAt is backfilled lazily on first change.
+  },
+  9: {
+    notes: [
+      "Fixed an edit-nullification bug where Realtime events were overwriting your own changes.",
+      "The sync status indicator no longer flickers — equal XP means already in sync, nothing happens.",
+      "Pulls from the cloud no longer trigger a push back, breaking the feedback loop for good.",
+      "Changelog entries now show reliably on every app update.",
+    ],
+  },
+  10: {
+    notes: [
+      "Version numbers now ship pre-bumped in every deploy — no more manual CACHE or APP_VERSION edits needed.",
+    ],
   },
 };
 
@@ -1051,7 +1063,12 @@ export default function App() {
     saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits);
     saveLog(b.log); saveSettings(b.settings); saveAreas(b.areas);
     saveHorizons(b.horizons); saveGame(b.game);
-    if (blob.meta) saveMeta({ ...blob.meta, version: APP_VERSION });
+    if (blob.meta) {
+      // Never downgrade the app version stored in meta — cloud may carry an older
+      // version number if it was last saved by a client running an earlier build.
+      // Keeping APP_VERSION ensures the What's New modal fires correctly on updates.
+      saveMeta({ ...blob.meta, version: Math.max(APP_VERSION, blob.meta.version || 0) });
+    }
     // React batches the setState calls above. isApplying resets after the
     // next render so the push effect sees it correctly.
     setTimeout(() => { isApplying.current = false; }, 0);
