@@ -73,7 +73,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -162,6 +162,13 @@ const MIGRATIONS = {
   10: {
     notes: [
       "Version numbers now ship pre-bumped in every deploy — no more manual CACHE or APP_VERSION edits needed.",
+    ],
+  },
+  11: {
+    notes: [
+      "Your pixel-art survivor avatars are here — Survivor F and M now show in the Watchtower card.",
+      "Sync now catches inbox items, projects, and areas that don't generate XP — the count tiebreaker fills the gap.",
+      "More avatar artwork coming as it's drawn in Piskel.",
     ],
   },
 };
@@ -453,55 +460,20 @@ const threatBand = (v) => THREAT_BANDS.find((b) => v <= b.max) || THREAT_BANDS[T
    Avatars are drawn from compact 12-row grids: each string is a row, each char
    a palette key. "." = transparent. Recoloring = swapping the palette map.
 ============================================================================ */
-const PX = {
-  // shared silhouette grid; palettes differ per avatar. 12x12.
-  female: [
-    "....hhhh....",
-    "...hhhhhh...",
-    "..hhssshh...",
-    "..hsskssh...",
-    "..hssssh....",
-    "...ssss.....",
-    "..cccccc....",
-    ".ccccccccc..",
-    ".cc cccc cc.",
-    ".cc cccc cc.",
-    "...bb..bb...",
-    "...bb..bb...",
-  ],
-  male: [
-    "...hhhhh....",
-    "..hhhhhhh...",
-    "..hsssssh...",
-    "..hsskssh...",
-    "..hssssh....",
-    "...ssss.....",
-    ".. kcccck...",
-    ".cccccccccc.",
-    ".cc cccc cc.",
-    ".ccccccccc..",
-    "...bb.bb....",
-    "...bb.bb....",
-  ],
-};
-// palette keys: h hair, s skin, k detail(eyes/strap), c clothing, b boots/legs
+// Avatars: each entry has id, name, tier, cost, tile color, and either
+// a `src` (base64 PNG — crips pixel art rendered with image-rendering:pixelated)
+// or a `grid`+`pal` (legacy SVG grid, used for placeholder entries).
 const AVATARS = [
-  { id: "av-f-survivor", name: "Survivor (F)", grid: "female", tier: 1, cost: 0,
-    pal: { h: "#3a2e26", s: "#d8a779", k: "#221f1a", c: "#2c6a55", b: "#4a3d33" } },
-  { id: "av-m-survivor", name: "Survivor (M)", grid: "male", tier: 1, cost: 0,
-    pal: { h: "#2a2420", s: "#cf9b6e", k: "#221f1a", c: "#3a4a63", b: "#4a3d33" } },
-  { id: "av-f-scout", name: "Scout (F)", grid: "female", tier: 2, cost: 140,
-    pal: { h: "#6b3410", s: "#e0b487", k: "#221f1a", c: "#bd5b27", b: "#5c554a" } },
-  { id: "av-m-ranger", name: "Ranger (M)", grid: "male", tier: 2, cost: 140,
-    pal: { h: "#1f3326", s: "#c98f63", k: "#221f1a", c: "#3f6b3a", b: "#3d3329" } },
-  { id: "av-f-warden", name: "Warden (F)", grid: "female", tier: 4, cost: 480,
-    pal: { h: "#222", s: "#d8a779", k: "#c08a16", c: "#1f4e3e", b: "#2a2a2a" } },
-  { id: "av-m-warden", name: "Warden (M)", grid: "male", tier: 4, cost: 480,
-    pal: { h: "#222", s: "#cf9b6e", k: "#c08a16", c: "#1f4e3e", b: "#2a2a2a" } },
-  { id: "av-f-architect", name: "Architect (F)", grid: "female", tier: 6, cost: 1100,
-    pal: { h: "#4a3a1a", s: "#e0b487", k: "#c08a16", c: "#7a2e1a", b: "#c08a16" } },
-  { id: "av-m-architect", name: "Architect (M)", grid: "male", tier: 6, cost: 1100,
-    pal: { h: "#3a2e10", s: "#cf9b6e", k: "#c08a16", c: "#7a2e1a", b: "#c08a16" } },
+  { id: "av-f-survivor", name: "Survivor (F)", tier: 1, cost: 0, tile: "#2c6a55",
+    src: "data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAgACADASIAAhEBAxEB/8QAGAABAQEBAQAAAAAAAAAAAAAABgcEAQP/xAAmEAACAgICAQQCAwEAAAAAAAABAgMEBREGEiEABxMxIjIIFVFh/8QAGQEAAgMBAAAAAAAAAAAAAAAAAQIAAwQF/8QAJxEAAQIFAwMFAQAAAAAAAAAAAQIDAAQRITEFBhITQVEVI2Gx0fH/2gAMAwEAAhEDEQA/AI1VhN6WVBO8MMLdJHjK/IX0G6r2BA8EEsQfsAAkkp2XHzC7FXrXrRgI7TvPCjOq+f0deq9iQPBRuvkkn8VJPks2fw96W9jLnStbZe6dVPVwuvpt/YH2P88/Q9I+I+3mZ5hx+nzLl3IcZjMI+QGOgluzwRpsqxeQhpoR1XqNhSXbXhWC+uzrU/qjU+57hQnAAxTtbFT5/kZXUv8AMq5UEbb2NWOJWxYeCUyIriSSSdShYBjqSTYKjZGiN6IIOwV8D3isvUmZGljVX7J4DoxIVtbPXfVgVP0QfJGmNY5f7C2OM8dtZy/muHNXrdO4PH68H7OqD857EcY8sP2Yb+hskAxFqk68ryK1J8RNRp3ZKq2scXSOwkbEK8cYZoujb7eN/uSDs79NtrUp9MylkqK0HIzT5qfH1WBK9YGijURuylipUwuZa1RhtvZqCGs8tSKcV3IkUkd9Mm/kDd42DK0Ue1cbAae1PBeQ5T22x2bw2JtZWi8kkMtahZSCaGRJ+zuOzp+MqiJHKMH1Cg+gCobMVbeToWaWOrGxKOoc/LHGqHYIBLsNnQ3obI2N62Nuv4r5n3XMmUwPBrWGevU1PNSzXyfGhJZT06fkp39jY8gf99Dc7cuqcV0lVNiq+Dj8tFr6UOAgHuKw0zXDEmoUuO8YuYnOcgxVez/d18Pkaq2uzu0cQTs4ctSTddTIqdY5gE1+UQjsgK5/OxNjWxjxZKSF6jSd2idFVGDNs9mLKSTttkn8m+zX+X+9vvZxnkGTwtvjvDLM+MKrYesspXbRJKAoadXY9ZF+l+/A36iWCu38qt3M5KX5reRuy25pdKvyO52zaXQG27eAAP8APT7TbHqHIXoDEYbTzKgb4zH/2Q==" },
+  { id: "av-m-survivor", name: "Survivor (M)", tier: 1, cost: 0, tile: "#3a4a63",
+    src: "data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAgACADASIAAhEBAxEB/8QAGgAAAQUBAAAAAAAAAAAAAAAABwEDBQYIBP/EACkQAAIBAwMDBAEFAAAAAAAAAAECAwQFEQYSIQAHExQiMUEyI1FhgfD/xAAYAQADAQEAAAAAAAAAAAAAAAABAwUCBv/EACcRAAEDAgUDBQEAAAAAAAAAAAECAxEAIQQGEkFhBTGBInGhscHw/9oADAMBAAIRAxEAPwACamuj22mRYVzNNkIx+FxjJ/k8/wC+5Gx0dLbtMPebutRdS8KzbWqZowucYVdrqfv3M2cn8Rhd0kRq22V1fRpWUsKSQ0zSrJ+sgclVR32xlt7hVZWYqpAByTwcJPfrhSWujpa+13KnpTSwhQ4jEcsZXCuBJCchtjEckHBx8ddDmPGvuYsttL9KbWMbCfM0vEBagAg+9X2SwrTUFtrLppmOgguqBqV4L3JLMgJnCM0bSk7WWnZ0kCSROCvJ5HVdQ5aVd27xzSRbtu3dscruxk4zjOMnGcZPz1yQXzSNJUPJDbtRwT0+d7JDRK0fO05xDkcnH946eiqrXUwu9rp7+krS7y1dLT+L3EOxIVA3KsSMcZI+ujlvqL7WKKF6lJUO1zBkXubCO9YZKgu8wfP3Tldd6q32Ktt9O9tAqxIy+qQb0d4vFI0TZG0tGdpzkcDGDknR9n7X6M7k2W0alseoJ6F4YkRWoYomRVjZvCFR0PjKZfGMEEsD+OBlCm1OkNXWU0/lSGWfiqpJNsqqpAGCcgrjccfuxIx0YOw2jdP3GjShp+7V801cZm4gort6P1bO7BPFHx5CVRd2GYg7QQPgTOtvsv4pSm0abnnVzx/b0XACqCI/aKt57XaV1FLb9G0CXulpbUk8bVTWGVHMrSeSaWSpqAKeaN3VcJFGWDFWQiIMBni+U3pNTXum9a9cYLnUweqfG6cRytGrnbxkqi/HVx750Oqu3OrqOyDuJrm4W+4UKyxS111qFSWTfIskQdZFQEKIzgg/mMlQc9DyknppVMdOyjxexo9u0x44wVPK/B4I+ureUcO2HlO6xMQBvff42nmKY2kTIr//2Q==" },
+  { id: "av-f-scout",    name: "Scout (F)",    tier: 2, cost: 140,  tile: "#bd5b27", src: null },
+  { id: "av-m-ranger",   name: "Ranger (M)",   tier: 2, cost: 140,  tile: "#3f6b3a", src: null },
+  { id: "av-f-warden",   name: "Warden (F)",   tier: 4, cost: 480,  tile: "#1f4e3e", src: null },
+  { id: "av-m-warden",   name: "Warden (M)",   tier: 4, cost: 480,  tile: "#2a2a2a", src: null },
+  { id: "av-f-architect",name: "Architect (F)",tier: 6, cost: 1100, tile: "#7a2e1a", src: null },
+  { id: "av-m-architect",name: "Architect (M)",tier: 6, cost: 1100, tile: "#3a2e10", src: null },
 ];
 
 // Themes recolor the whole palette (buttons + backdrop) via a class on .gtd.
@@ -1042,6 +1014,9 @@ export default function App() {
   //      just apply what the other device already saved.
 
   const xpOf = (b) => (b?.game?.xp) || 0;
+  // Content count used as tiebreaker when XP is equal — catches inbox items,
+  // projects, areas, and waiting-for entries which don't generate XP.
+  const countOf = (b) => (b?.items?.length || 0) + (b?.projects?.length || 0) + (b?.areas?.length || 0);
   const snapshot = () => ({ version: APP_VERSION, items, projects, habits, log, settings, areas, horizons, game, meta });
 
   function applyLoaded(d) {
@@ -1082,14 +1057,16 @@ export default function App() {
     const cloud = await cloudLoad(s.user.id);
     const localXP = xpOf(snapshot());
     const cloudXP = xpOf(cloud?.data);
-    if (!cloud || localXP > cloudXP) {
-      // local has more progress — push it up
-      if (localXP > 0) await cloudSave(s.user.id, snapshot());
-    } else if (cloudXP > localXP) {
-      // cloud has more progress — apply it (isApplying guard prevents re-push)
+    const localCount = countOf(snapshot());
+    const cloudCount  = countOf(cloud?.data);
+    if (!cloud || localXP > cloudXP || (localXP === cloudXP && localCount > cloudCount)) {
+      // local wins: more XP, or equal XP but more content (inbox/projects/areas)
+      if (localXP > 0 || localCount > 0) await cloudSave(s.user.id, snapshot());
+    } else if (cloudXP > localXP || (localXP === cloudXP && cloudCount > localCount)) {
+      // cloud wins: more XP, or equal XP but more content on cloud side
       applyBlob(cloud.data);
     }
-    // equal XP → already in sync, nothing to do
+    // truly equal on both XP and count → already in sync, nothing to do
     setLastCloudSync(Date.now());
     setSyncBusy(false);
   };
@@ -1099,14 +1076,15 @@ export default function App() {
   // triggering a push back to the cloud.
   const applyRealtimeData = (data) => {
     if (!data) return;
-    const remoteXP = xpOf(data);
-    const localXP  = xpOf(snapshot());
-    // Only apply if the remote copy has genuinely more progress
-    if (remoteXP > localXP) {
+    const remoteXP    = xpOf(data);
+    const remoteCount = countOf(data);
+    const localXP     = xpOf(snapshot());
+    const localCount  = countOf(snapshot());
+    // Apply if remote has more XP, or equal XP but more content
+    if (remoteXP > localXP || (remoteXP === localXP && remoteCount > localCount)) {
       applyBlob(data);
       setLastCloudSync(Date.now());
     }
-    // If local XP is equal or higher, local is already up to date — ignore.
   };
 
   // Push immediately after any user-driven local change (skipped during applyBlob)
@@ -2595,26 +2573,37 @@ function HorizonsView({ horizons, areas, addHorizon, updateHorizon, deleteHorizo
   );
 }
 
-// Renders an avatar's pixel grid as crisp SVG rects. size = pixel box in px.
-function AvatarPixels({ avatar, size = 56, bg = "transparent" }) {
+// Renders an avatar. If the avatar has a src (base64 PNG), display it as a
+// crisp pixel-art image. Fallback: solid tile color placeholder for avatars
+// not yet drawn (future Piskel artwork). size controls the rendered square.
+function AvatarPixels({ avatar, size = 56 }) {
   const a = avatar || AVATARS[0];
-  const grid = PX[a.grid] || PX.female;
-  const cols = grid[0].length, rows = grid.length;
-  const cell = size / Math.max(cols, rows);
-  const rects = [];
-  grid.forEach((row, y) => {
-    for (let x = 0; x < row.length; x++) {
-      const ch = row[x];
-      if (ch === "." || ch === " ") continue;
-      const fill = a.pal[ch];
-      if (!fill) continue;
-      rects.push(<rect key={y + "-" + x} x={x * cell} y={y * cell} width={cell + 0.4} height={cell + 0.4} fill={fill} />);
-    }
-  });
+  if (a.src) {
+    return (
+      <img
+        src={a.src}
+        width={size}
+        height={size}
+        alt={a.name}
+        style={{
+          display: "block",
+          borderRadius: 10,
+          imageRendering: "pixelated",
+          width: size,
+          height: size,
+        }}
+      />
+    );
+  }
+  // Placeholder tile for avatars not yet drawn
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${cols * cell} ${rows * cell}`} style={{ background: bg, borderRadius: 10, shapeRendering: "crispEdges", display: "block" }}>
-      {rects}
-    </svg>
+    <div style={{
+      width: size, height: size, borderRadius: 10,
+      background: a.tile || "var(--pine)",
+      display: "flex", alignItems: "center", justifyContent: "center",
+    }}>
+      <span style={{ fontSize: size * 0.35, opacity: 0.5 }}>?</span>
+    </div>
   );
 }
 const themeById = (id) => THEMES.find((t) => t.id === id) || THEMES[0];
