@@ -73,7 +73,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 13;
+const APP_VERSION = 14;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -183,6 +183,14 @@ const MIGRATIONS = {
       "Fixed XP and ₲ not syncing across devices after completing or clarifying tasks.",
       "Added a 300ms push debounce so completing a task (which triggers both a state change and an XP award) syncs as one coherent update.",
       "Fixed delete sync — deleting a task now correctly propagates even when the refunded XP caused the other device to think its copy was more progressed.",
+    ],
+  },
+  14: {
+    notes: [
+      "App now fills the full screen on desktop, tablet, and mobile — no more fixed 760px window.",
+      "Sidebar is now toggleable on desktop — click the menu icon in the top bar to collapse or expand, and the preference is remembered.",
+      "iPad layout fixed — proper safe areas on all sides in both portrait and landscape.",
+      "Pixel-art avatars now render crisply on all devices including high-DPI Retina screens.",
     ],
   },
 };
@@ -550,17 +558,59 @@ const STYLE = `
 .subq { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:1.5px; font-style:normal; vertical-align:middle; margin-left:6px; }
 
 /* ---- App shell layout (desktop default = two columns) ---- */
-.app-shell { position:relative; height:760px; display:flex; overflow:hidden; border-radius:14px; border:1px solid var(--line); }
-.sidebar { width:232px; flex-shrink:0; background:var(--paper2); border-right:1px solid var(--line);
-  padding:18px 13px; display:flex; flex-direction:column; overflow:auto; }
+/* ---- App shell: full viewport on all screen sizes ---- */
+.app-shell {
+  position:relative; display:flex; overflow:hidden;
+  /* Fill full viewport — no fixed 760px cap */
+  height:100dvh; height:100vh; /* dvh for iOS, vh fallback */
+  border-radius:0; border:none;
+}
+/* On larger screens, add a subtle inner border and rounded feel */
+@media (min-width: 1024px) {
+  #root { padding:16px; }
+  .app-shell { border-radius:14px; border:1px solid var(--line); height:calc(100dvh - 32px); height:calc(100vh - 32px); }
+}
+
+.sidebar {
+  width:248px; flex-shrink:0; background:var(--paper2);
+  border-right:1px solid var(--line);
+  padding:18px 13px; display:flex; flex-direction:column; overflow:auto;
+  transition:width .2s ease, padding .2s ease;
+  /* iPad landscape: respect left safe area */
+  padding-left:max(13px, calc(13px + env(safe-area-inset-left, 0px)));
+}
+/* Collapsed sidebar on desktop */
+.app-shell.sidebar-collapsed .sidebar {
+  width:0; padding:0; border-right:none; overflow:hidden;
+}
+.sidebar-toggle {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:30px; height:30px; border-radius:7px;
+  border:1px solid var(--line2); background:var(--card);
+  color:var(--ink); cursor:pointer; flex-shrink:0;
+  transition:background .12s;
+}
+.sidebar-toggle:hover { background:var(--paper2); }
+
 .mobile-topbar { display:none; }
 .drawer-backdrop { display:none; }
 .hamburger { display:inline-flex; align-items:center; justify-content:center; width:38px; height:38px;
   border-radius:9px; border:1px solid var(--line2); background:var(--card); color:var(--ink); cursor:pointer; }
 .hamburger:hover { background:var(--paper2); }
 
-/* ---- Mobile / narrow screens: sidebar becomes an off-canvas drawer ---- */
+/* ---- Tablet (iPad): sidebar is permanent but narrower, safe areas on both sides ---- */
+@media (min-width: 761px) and (max-width: 1023px) {
+  #root { padding:0; }
+  .app-shell { border-radius:0; border:none; height:100dvh; }
+  .sidebar { width:220px; padding-top:calc(18px + env(safe-area-inset-top, 0px)); }
+  .app-shell.sidebar-collapsed .sidebar { width:0; }
+  .content-scroll { padding-bottom:calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .main-col { padding-right:env(safe-area-inset-right, 0px); }
+}
+
+/* ---- Mobile / narrow screens: sidebar is an off-canvas drawer ---- */
 @media (max-width: 760px) {
+  #root { padding:0; }
   .app-shell { height:100dvh; border-radius:0; border:none; }
   .mobile-topbar { display:flex; align-items:center; gap:11px;
     padding:10px 14px;
@@ -570,24 +620,26 @@ const STYLE = `
     position:absolute; top:0; left:0; bottom:0; z-index:60; width:264px; max-width:84vw;
     transform:translateX(-100%); transition:transform .24s ease; box-shadow:0 0 0 rgba(0,0,0,0);
     padding-top:calc(18px + env(safe-area-inset-top, 0px));
+    /* Reset collapsed state — on mobile the drawer handles open/close */
+    width:264px !important; padding-left:13px !important;
   }
   .app-shell.drawer-open .sidebar { transform:translateX(0); box-shadow:6px 0 24px rgba(0,0,0,.22); }
   .app-shell.drawer-open .drawer-backdrop {
     display:block; position:absolute; inset:0; z-index:55; background:rgba(20,16,14,.42);
     animation:fade .2s ease;
   }
-}
-/* On true desktop, never show the drawer chrome even if state flips */
-@media (min-width: 761px) {
-  .mobile-topbar, .drawer-backdrop { display:none !important; }
-  .sidebar { transform:none !important; }
-}
-/* Tighten interior spacing on phones so nothing clips */
-@media (max-width: 760px) {
+  /* Sidebar toggle not needed on mobile — drawer handles it */
+  .sidebar-toggle { display:none; }
   .content-scroll { padding:16px !important; padding-bottom:calc(16px + env(safe-area-inset-bottom, 0px)) !important; }
   .strip { gap:10px; padding:7px 12px; flex-wrap:wrap; }
   .strip .seg { font-size:11px; }
 }
+/* Desktop: sidebar toggle visible, mobile chrome hidden */
+@media (min-width: 761px) {
+  .mobile-topbar, .drawer-backdrop { display:none !important; }
+  .sidebar { transform:none !important; }
+}
+
 
 .card { background:var(--card); border:1px solid var(--line); border-radius:12px; }
 .hair { border-color:var(--line); }
@@ -967,6 +1019,14 @@ export default function App() {
   const [onboarding, setOnboarding] = useState(false);
   const [whatsNew, setWhatsNew] = useState(null); // array of {version, notes} or null
   const [drawerOpen, setDrawerOpen] = useState(false); // mobile nav drawer
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("clearmind-sidebar-collapsed") === "true"; } catch { return false; }
+  });
+  const toggleSidebar = () => setSidebarCollapsed(v => {
+    const next = !v;
+    try { localStorage.setItem("clearmind-sidebar-collapsed", String(next)); } catch {}
+    return next;
+  });
   const captureRef = useRef(null);
   const aside_touchX = useRef(null);
 
@@ -1596,7 +1656,7 @@ export default function App() {
       </div>
     )}
     {(!syncEnabled || session) && (
-    <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "")}
+    <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "") + (sidebarCollapsed ? " sidebar-collapsed" : "")}
       style={!game.inSiege && themeById(game.equipped?.theme).vars ? themeById(game.equipped.theme).vars : undefined}>
       <style>{STYLE}</style>
 
@@ -1655,7 +1715,16 @@ export default function App() {
         </div>
 
         {/* STATUS STRIP — glanceable, doorway to the Watchtower */}
-        <StatusStrip threat={threat} band={band} lvl={lvl} rank={rank} gtd={game.gtd} siege={game.inSiege} onClick={goWatch} />
+        {/* Sidebar toggle sits here on desktop so it's always accessible */}
+        <div style={{ display: "flex", alignItems: "stretch" }}>
+          <button className="sidebar-toggle" title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+            onClick={toggleSidebar} style={{ margin: "0 0 0 10px", alignSelf: "center" }}>
+            <Menu size={15} />
+          </button>
+          <div style={{ flex: 1 }}>
+            <StatusStrip threat={threat} band={band} lvl={lvl} rank={rank} gtd={game.gtd} siege={game.inSiege} onClick={goWatch} />
+          </div>
+        </div>
 
         {/* CAPTURE BAR — always present */}
         <div style={{ padding: "14px 22px", borderBottom: "1px solid var(--line)", background: "var(--card)" }}>
@@ -2612,26 +2681,24 @@ function HorizonsView({ horizons, areas, addHorizon, updateHorizon, deleteHorizo
 function AvatarPixels({ avatar, size = 56 }) {
   const a = avatar || AVATARS[0];
   if (a.src) {
+    // Use background-image rather than <img> — Safari on iOS/iPadOS respects
+    // image-rendering:pixelated more reliably on background images than on <img>.
+    // background-size:100% 100% scales the 32x32 PNG to fill the tile without blur.
     return (
-      <img
-        src={a.src}
-        width={size}
-        height={size}
-        alt={a.name}
-        style={{
-          display: "block",
-          borderRadius: 10,
-          imageRendering: "pixelated",
-          width: size,
-          height: size,
-        }}
-      />
+      <div style={{
+        width: size, height: size, borderRadius: 10, flexShrink: 0,
+        backgroundImage: `url("${a.src}")`,
+        backgroundSize: "100% 100%",
+        backgroundRepeat: "no-repeat",
+        imageRendering: "pixelated",
+        // Webkit vendor prefix for older Safari
+        WebkitImageRendering: "pixelated",
+      }} role="img" aria-label={a.name} />
     );
   }
-  // Placeholder tile for avatars not yet drawn
   return (
     <div style={{
-      width: size, height: size, borderRadius: 10,
+      width: size, height: size, borderRadius: 10, flexShrink: 0,
       background: a.tile || "var(--pine)",
       display: "flex", alignItems: "center", justifyContent: "center",
     }}>

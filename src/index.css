@@ -1,22 +1,20 @@
-/* The App component carries its own theme; this just frames it on the page. */
+/* Base page styles — the app shell handles its own layout. */
 * { box-sizing: border-box; }
 html, body {
   margin: 0;
   padding: 0;
   background: #e9e3d6;
-  min-height: 100vh;
+  min-height: 100dvh;
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
 }
 #root {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 18px;
+  /* Default: small breathing room on desktop.
+     The @media rules inside App's STYLE block adjust this per breakpoint. */
+  padding: 16px;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
 }
-/* On phones, fill the screen — the app shell handles its own layout/drawer. */
-@media (max-width: 760px) {
-  #root { max-width: none; margin: 0; padding: 0; }
-}
-/* In an installed PWA window on desktop, a little breathing room. */
-@media (display-mode: standalone) and (min-width: 761px) {
-  #root { padding: 10px; }
+@media (max-width: 1023px) {
+  #root { padding: 0; }
 }
