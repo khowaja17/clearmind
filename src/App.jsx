@@ -73,7 +73,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 11;
+const APP_VERSION = 12;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -167,8 +167,15 @@ const MIGRATIONS = {
   11: {
     notes: [
       "Your pixel-art survivor avatars are here — Survivor F and M now show in the Watchtower card.",
-      "Sync now catches inbox items, projects, and areas that don't generate XP — the count tiebreaker fills the gap.",
-      "More avatar artwork coming as it's drawn in Piskel.",
+      "Sync now catches inbox items, projects, and areas that don\'t generate XP — the count tiebreaker fills the gap.",
+      "More avatar artwork coming as it\'s drawn in Piskel.",
+    ],
+  },
+  12: {
+    notes: [
+      "Fixed stale-snapshot sync bug — edits made on one device now appear immediately on all others without needing a refresh.",
+      "Inbox items, projects added without completing actions, and areas now sync reliably across devices.",
+      "Fixed a race condition where a project could disappear seconds after being created.",
     ],
   },
 };
@@ -956,6 +963,11 @@ export default function App() {
   const captureRef = useRef(null);
   const aside_touchX = useRef(null);
 
+  // stateRef always holds the latest committed values of every data slice.
+  // snapshot() reads from here so it's never one render behind (the stale
+  // closure problem that caused pushed data to be missing the latest change).
+  const stateRef = useRef({ items:[], projects:[], habits:[], log:{}, settings:{ contexts: DEFAULT_CONTEXTS, lastReview: null }, areas:[], horizons:{ goals:[], vision:[], purpose:[] }, game:{ xp:0, gtd:0, ownedCosmetics:["av-f-survivor","av-m-survivor","theme-settlement"], equipped:{ avatar:"av-f-survivor", theme:"theme-settlement" }, lastTended:null, siegeBrokenAt:null, inSiege:false }, meta:{ version: APP_VERSION, name:"" } });
+
   // ---- load (with version detection + migrations) ----
   useEffect(() => {
     (async () => {
@@ -1017,11 +1029,15 @@ export default function App() {
   // Content count used as tiebreaker when XP is equal — catches inbox items,
   // projects, areas, and waiting-for entries which don't generate XP.
   const countOf = (b) => (b?.items?.length || 0) + (b?.projects?.length || 0) + (b?.areas?.length || 0);
-  const snapshot = () => ({ version: APP_VERSION, items, projects, habits, log, settings, areas, horizons, game, meta });
+  // Reads from stateRef so it is always current even in async/stale-closure contexts.
+  const snapshot = () => ({ version: APP_VERSION, ...stateRef.current });
 
   function applyLoaded(d) {
     setItems(d.items); setProjects(d.projects); setHabits(d.habits); setLog(d.log);
     setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
+    // seed stateRef so snapshot() is immediately correct after load
+    stateRef.current = { items: d.items, projects: d.projects, habits: d.habits, log: d.log,
+      settings: d.settings, areas: d.areas, horizons: d.horizons, game: d.game, meta: stateRef.current.meta };
   }
 
   // Guard: true while we're applying a cloud blob. The push-on-change effect
@@ -1038,14 +1054,11 @@ export default function App() {
     saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits);
     saveLog(b.log); saveSettings(b.settings); saveAreas(b.areas);
     saveHorizons(b.horizons); saveGame(b.game);
+    // Each save* call above updates stateRef so snapshot() is immediately current.
     if (blob.meta) {
-      // Never downgrade the app version stored in meta — cloud may carry an older
-      // version number if it was last saved by a client running an earlier build.
-      // Keeping APP_VERSION ensures the What's New modal fires correctly on updates.
       saveMeta({ ...blob.meta, version: Math.max(APP_VERSION, blob.meta.version || 0) });
     }
-    // React batches the setState calls above. isApplying resets after the
-    // next render so the push effect sees it correctly.
+    // Reset isApplying after React's batch flush so the push effect skips this cycle.
     setTimeout(() => { isApplying.current = false; }, 0);
   };
 
@@ -1161,23 +1174,23 @@ export default function App() {
     if (!loaded) return;
     if (firstChange.current) { firstChange.current = false; return; }
     if (isApplying.current) return; // cloud pull in progress — don't echo it back
-    const stamped = { ...meta, updatedAt: Date.now() };
-    setMeta(stamped); store.save(KEYS.meta, stamped);
+    const stamped = { ...stateRef.current.meta, updatedAt: Date.now() };
+    saveMeta(stamped); // updates stateRef.meta too, so snapshot() picks it up
     if (syncEnabled && session) pushCloud(session);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, projects, habits, log, settings, areas, horizons, game]);
 
 
-  // ---- persisted setters ----
-  const saveItems = (v) => { setItems(v); store.save(KEYS.items, v); };
-  const saveProjects = (v) => { setProjects(v); store.save(KEYS.projects, v); };
-  const saveHabits = (v) => { setHabits(v); store.save(KEYS.habits, v); };
-  const saveLog = (v) => { setLog(v); store.save(KEYS.log, v); };
-  const saveSettings = (v) => { setSettings(v); store.save(KEYS.settings, v); };
-  const saveAreas = (v) => { setAreas(v); store.save(KEYS.areas, v); };
-  const saveHorizons = (v) => { setHorizons(v); store.save(KEYS.horizons, v); };
-  const saveGame = (v) => { setGame(v); store.save(KEYS.game, v); };
-  const saveMeta = (v) => { setMeta(v); store.save(KEYS.meta, v); };
+  // ---- persisted setters — each also updates stateRef so snapshot() is never stale ----
+  const saveItems    = (v) => { setItems(v);    store.save(KEYS.items, v);    stateRef.current = { ...stateRef.current, items: v }; };
+  const saveProjects = (v) => { setProjects(v); store.save(KEYS.projects, v); stateRef.current = { ...stateRef.current, projects: v }; };
+  const saveHabits   = (v) => { setHabits(v);   store.save(KEYS.habits, v);   stateRef.current = { ...stateRef.current, habits: v }; };
+  const saveLog      = (v) => { setLog(v);       store.save(KEYS.log, v);      stateRef.current = { ...stateRef.current, log: v }; };
+  const saveSettings = (v) => { setSettings(v); store.save(KEYS.settings, v); stateRef.current = { ...stateRef.current, settings: v }; };
+  const saveAreas    = (v) => { setAreas(v);    store.save(KEYS.areas, v);    stateRef.current = { ...stateRef.current, areas: v }; };
+  const saveHorizons = (v) => { setHorizons(v); store.save(KEYS.horizons, v); stateRef.current = { ...stateRef.current, horizons: v }; };
+  const saveGame     = (v) => { setGame(v);     store.save(KEYS.game, v);     stateRef.current = { ...stateRef.current, game: v }; };
+  const saveMeta     = (v) => { setMeta(v);     store.save(KEYS.meta, v);     stateRef.current = { ...stateRef.current, meta: v }; };
 
   // ---- onboarding completion: persist name + seed GVP into horizons ----
   const finishOnboarding = ({ name, goals, vision, purpose }) => {
