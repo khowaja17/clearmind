@@ -73,7 +73,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 12;
+const APP_VERSION = 13;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -176,6 +176,13 @@ const MIGRATIONS = {
       "Fixed stale-snapshot sync bug — edits made on one device now appear immediately on all others without needing a refresh.",
       "Inbox items, projects added without completing actions, and areas now sync reliably across devices.",
       "Fixed a race condition where a project could disappear seconds after being created.",
+    ],
+  },
+  13: {
+    notes: [
+      "Fixed XP and ₲ not syncing across devices after completing or clarifying tasks.",
+      "Added a 300ms push debounce so completing a task (which triggers both a state change and an XP award) syncs as one coherent update.",
+      "Fixed delete sync — deleting a task now correctly propagates even when the refunded XP caused the other device to think its copy was more progressed.",
     ],
   },
 };
@@ -1168,15 +1175,23 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, loaded]);
 
-  // Push after any user-driven data change (skipped when isApplying is true)
+  // Push after any user-driven data change (skipped when isApplying is true).
+  // 300ms debounce: completing a task triggers saveItems + award() in sequence.
+  // Without the debounce, the first effect run (after saveItems) would push a
+  // snapshot where XP hasn't updated yet. The debounce lets all synchronous
+  // state updates settle before we read stateRef and push.
+  const pushTimer = useRef(null);
   const firstChange = useRef(true);
   useEffect(() => {
     if (!loaded) return;
     if (firstChange.current) { firstChange.current = false; return; }
     if (isApplying.current) return; // cloud pull in progress — don't echo it back
     const stamped = { ...stateRef.current.meta, updatedAt: Date.now() };
-    saveMeta(stamped); // updates stateRef.meta too, so snapshot() picks it up
-    if (syncEnabled && session) pushCloud(session);
+    saveMeta(stamped);
+    if (syncEnabled && session) {
+      if (pushTimer.current) clearTimeout(pushTimer.current);
+      pushTimer.current = setTimeout(() => { pushCloud(session); }, 300);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items, projects, habits, log, settings, areas, horizons, game]);
 
@@ -1218,24 +1233,26 @@ export default function App() {
   // can never drive a balance negative. XP is permanent and accrues even in siege;
   // the ₲ economy is frozen in siege (positive grants only).
   const award = (xp, gtd, msg, opts = {}) => {
-    setGame((g) => {
-      const siegeFrozen = g.inSiege && !opts.duringSiege;
-      const ng = { ...g, lastTended: Date.now() };
-      const beforeLvl = levelFromXP(g.xp);
-      ng.xp = Math.max(0, g.xp + (xp || 0));
-      // ₲ moves on grants always; on reclaims always (you can lose ₲ in siege, just not earn it)
-      if (!siegeFrozen || (gtd || 0) < 0) ng.gtd = Math.max(0, g.gtd + (gtd || 0));
-      store.save(KEYS.game, ng);
-      const afterLvl = levelFromXP(ng.xp);
-      if (msg) {
-        const bits = [];
-        if (xp) bits.push(`${xp > 0 ? "+" : ""}${xp} XP`);
-        if (gtd && (!siegeFrozen || gtd < 0)) bits.push(`${gtd > 0 ? "+" : ""}${gtd} ₲`);
-        pushToast(`${msg}${bits.length ? "  " + bits.join("  ") : ""}`);
-      }
-      if (afterLvl > beforeLvl) setTimeout(() => pushToast(`◆ Rank up — Level ${afterLvl}, ${rankFor(afterLvl)}`), 700);
-      return ng;
-    });
+    // Read current game from stateRef (always current) rather than closed-over state
+    const g = stateRef.current.game;
+    const siegeFrozen = g.inSiege && !opts.duringSiege;
+    const ng = { ...g, lastTended: Date.now() };
+    const beforeLvl = levelFromXP(g.xp);
+    ng.xp = Math.max(0, g.xp + (xp || 0));
+    if (!siegeFrozen || (gtd || 0) < 0) ng.gtd = Math.max(0, g.gtd + (gtd || 0));
+    // Update both React state AND stateRef synchronously so snapshot() captures
+    // the new XP/₲ immediately — without this, pushCloud would push stale game state.
+    setGame(ng);
+    store.save(KEYS.game, ng);
+    stateRef.current = { ...stateRef.current, game: ng };
+    const afterLvl = levelFromXP(ng.xp);
+    if (msg) {
+      const bits = [];
+      if (xp) bits.push(`${xp > 0 ? "+" : ""}${xp} XP`);
+      if (gtd && (!siegeFrozen || gtd < 0)) bits.push(`${gtd > 0 ? "+" : ""}${gtd} ₲`);
+      pushToast(`${msg}${bits.length ? "  " + bits.join("  ") : ""}`);
+    }
+    if (afterLvl > beforeLvl) setTimeout(() => pushToast(`◆ Rank up — Level ${afterLvl}, ${rankFor(afterLvl)}`), 700);
   };
 
   // ---- item ops ----
@@ -1417,27 +1434,30 @@ export default function App() {
     }
     const today = todayStr();
     saveSettings({ ...settings, lastReview: today });
-    const wasSiege = game.inSiege;
-    const ng = { ...game, lastTended: Date.now(), siegeBrokenAt: Date.now(), inSiege: false };
-    ng.xp = game.xp + 200;
-    ng.gtd = game.gtd + 100;
+    const g = stateRef.current.game;
+    const wasSiege = g.inSiege;
+    const ng = { ...g, lastTended: Date.now(), siegeBrokenAt: Date.now(), inSiege: false };
+    ng.xp = g.xp + 200;
+    ng.gtd = g.gtd + 100;
     saveGame(ng);
     pushToast("◆◆ SETTLEMENT FORTIFIED  +200 XP  +100 ₲");
     if (wasSiege) setTimeout(() => pushToast("The siege is broken. Dawn comes."), 800);
-    const after = levelFromXP(ng.xp), before = levelFromXP(game.xp);
+    const after = levelFromXP(ng.xp), before = levelFromXP(g.xp);
     if (after > before) setTimeout(() => pushToast(`◆ Rank up — Level ${after}, ${rankFor(after)}`), 1100);
   };
 
   // ---- cosmetics (avatars + themes) ----
-  const ownsCosmetic = (id) => (game.ownedCosmetics || []).includes(id);
+  const ownsCosmetic = (id) => (stateRef.current.game.ownedCosmetics || []).includes(id);
   const buyCosmetic = (item) => {
-    if (ownsCosmetic(item.id) || game.gtd < item.cost || game.inSiege) return;
-    saveGame({ ...game, gtd: game.gtd - item.cost, ownedCosmetics: [...(game.ownedCosmetics || []), item.id] });
+    const g = stateRef.current.game;
+    if (ownsCosmetic(item.id) || g.gtd < item.cost || g.inSiege) return;
+    saveGame({ ...g, gtd: g.gtd - item.cost, ownedCosmetics: [...(g.ownedCosmetics || []), item.id] });
     pushToast(`Acquired: ${item.name}`);
   };
-  const equipCosmetic = (kind, item) => { // kind: "avatar" | "theme"
+  const equipCosmetic = (kind, item) => {
     if (!ownsCosmetic(item.id)) return;
-    saveGame({ ...game, equipped: { ...game.equipped, [kind]: item.id } });
+    const g = stateRef.current.game;
+    saveGame({ ...g, equipped: { ...g.equipped, [kind]: item.id } });
   };
 
   // ---- export / import ----
