@@ -5,7 +5,7 @@ import {
   Check, X, Download, Upload, RotateCcw, Flame, Sparkles, ArrowRight,
   AlertTriangle, Sun, ListChecks, Send, Clipboard, Filter, Pencil, Settings2,
   Archive, Lock, Link2, Compass, Mountain, Target, ShoppingBag, Shield, Menu,
-  Leaf, Timer
+  Leaf, Timer, TreePine
 } from "lucide-react";
 import { syncEnabled } from "./supabaseClient.js";
 import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave, subscribeRealtime } from "./cloudSync.js";
@@ -76,7 +76,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 16;
+const APP_VERSION = 17;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -219,6 +219,22 @@ const MIGRATIONS = {
     notes: [
       "Fixed a bug where the What's New changelog wasn't showing after updates on synced devices.",
     ],
+  },
+  17: {
+    notes: [
+      "Goals can now link to a Vision, and Visions to a Purpose — building your full H3→H4→H5 hierarchy in Goals · Vision · Purpose.",
+      "All goals, visions, and purposes are now editable in-place — pencil icon to fix a typo, links survive the edit.",
+      "When clarifying an inbox item into a Next Action, you can now attach it to a project or area in the same step — or spin up a new project inline.",
+      "New tab: The Canopy — a tree view of your full hierarchy from Purpose down to Actions, with Outline and Map modes.",
+      "Actions can now live directly under an Area of Focus without needing a project.",
+    ],
+    migrate: (all) => {
+      const horizons = { ...(all.horizons || {}) };
+      horizons.goals  = (horizons.goals  || []).map((g) => ({ visionId: null,   ...g }));
+      horizons.vision = (horizons.vision || []).map((v) => ({ purposeId: null,  ...v }));
+      const items = (all.items || []).map((it) => ({ areaId: null, ...it }));
+      return { ...all, horizons, items };
+    },
   },
 };
 
@@ -722,18 +738,32 @@ function Empty({ icon, title, sub }) {
 /* ============================================================================
    CLARIFY MODAL — the heart of GTD inbox processing
 ============================================================================ */
-function Clarify({ item, contexts, onClose, onTransform, onDelete }) {
+function Clarify({ item, contexts, projects, areas, onClose, onTransform, onDelete, onCreateProject }) {
   const [title, setTitle] = useState(item.title);
   const [notes, setNotes] = useState(item.notes || "");
-  const [step, setStep] = useState("decide"); // decide | next | waiting | calendar
+  const [step, setStep] = useState("decide");
   const [ctx, setCtx] = useState(contexts[0]);
   const [energy, setEnergy] = useState("medium");
   const [time, setTime] = useState("15m");
   const [recur, setRecur] = useState("");
   const [who, setWho] = useState("");
   const [date, setDate] = useState(todayStr());
+  const [projectId, setProjectId] = useState("");
+  const [areaId, setAreaId] = useState("");
+  const [showNewProj, setShowNewProj] = useState(false);
+  const [newProjTitle, setNewProjTitle] = useState("");
+  const [newProjAreaId, setNewProjAreaId] = useState("");
 
   const base = () => ({ ...item, title: title.trim() || item.title, notes });
+
+  const commitNew = () => {
+    if (!newProjTitle.trim()) return;
+    const pid = onCreateProject(newProjTitle.trim(), newProjAreaId || null);
+    setProjectId(pid);
+    setAreaId("");
+    setShowNewProj(false);
+    setNewProjTitle(""); setNewProjAreaId("");
+  };
 
   return (
     <div className="overlay" onClick={onClose}>
@@ -786,8 +816,48 @@ function Clarify({ item, contexts, onClose, onTransform, onDelete }) {
               <div className="tag-ink" style={{ fontSize: 12, marginBottom: 6 }}>Repeat</div>
               <div style={{ display: "flex", gap: 6 }}>{RECUR.map((r) => <Pill key={r.v} on={recur === r.v} onClick={() => setRecur(r.v)}>{r.label}</Pill>)}</div>
             </div>
+
+            <div style={{ marginTop: 14 }}>
+              <div className="tag-ink" style={{ fontSize: 12, marginBottom: 6 }}>Project (optional)</div>
+              {showNewProj ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  <input className="input" autoFocus placeholder="New project — desired outcome…"
+                    value={newProjTitle} onChange={(e) => setNewProjTitle(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && commitNew()} />
+                  {areas.length > 0 && (
+                    <select className="input" value={newProjAreaId} onChange={(e) => setNewProjAreaId(e.target.value)}>
+                      <option value="">— no area —</option>
+                      {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
+                    </select>
+                  )}
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button className="btn btn-sm btn-accent" onClick={commitNew}><Plus size={13} /> Create & assign</button>
+                    <button className="btn btn-sm btn-ghost" onClick={() => { setShowNewProj(false); setNewProjTitle(""); setNewProjAreaId(""); }}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <select className="input" style={{ flex: 1 }} value={projectId}
+                    onChange={(e) => { setProjectId(e.target.value); if (e.target.value) setAreaId(""); }}>
+                    <option value="">— none —</option>
+                    {(projects || []).map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+                  </select>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setShowNewProj(true)}><Plus size={13} /> New</button>
+                </div>
+              )}
+              {!projectId && !showNewProj && areas.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <div className="tag-ink" style={{ fontSize: 12, marginBottom: 6 }}>Or attach to an area</div>
+                  <select className="input" value={areaId} onChange={(e) => setAreaId(e.target.value)}>
+                    <option value="">— none —</option>
+                    {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+
             <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
-              <button className="btn btn-accent" onClick={() => onTransform({ ...base(), type: "next", done: false, context: ctx, energy, time, recur: recur || null })}>
+              <button className="btn btn-accent" onClick={() => onTransform({ ...base(), type: "next", done: false, context: ctx, energy, time, recur: recur || null, projectId: projectId || null, areaId: (!projectId && areaId) ? areaId : null })}>
                 <ArrowRight size={15} /> Add to Next Actions
               </button>
               <button className="btn btn-ghost" onClick={() => setStep("decide")}>Back</button>
@@ -1049,6 +1119,7 @@ export default function App() {
         store.save(KEYS.game, data.game);
         store.save(KEYS.horizons, data.horizons);
         store.save(KEYS.settings, data.settings);
+        store.save(KEYS.items, data.items);
         const m = { ...savedMeta, version: APP_VERSION, journeyStarted: savedMeta.journeyStarted || savedMeta.createdAt || Date.now(), updatedAt: savedMeta.updatedAt || savedMeta.journeyStarted || savedMeta.createdAt || Date.now() };
         setMeta(m); store.save(KEYS.meta, m);
       } else {
@@ -1426,9 +1497,9 @@ export default function App() {
   const assignProjectArea = (pid, areaId) => updateProject(pid, { areaId });
 
   // ---- horizon ops (3 Goals / 4 Vision / 5 Purpose) ----
-  const addHorizon = (key, text, areaId) => {
+  const addHorizon = (key, text, areaId = null) => {
     if (!text.trim()) return;
-    saveHorizons({ ...horizons, [key]: [...(horizons[key] || []), { id: uid(), text: text.trim(), areaId: areaId || null }] });
+    saveHorizons({ ...horizons, [key]: [...(horizons[key] || []), { id: uid(), text: text.trim(), areaId: areaId || null, visionId: null, purposeId: null }] });
   };
   const updateHorizon = (key, id, patch) => saveHorizons({ ...horizons, [key]: (horizons[key] || []).map((x) => x.id === id ? { ...x, ...patch } : x) });
   const deleteHorizon = (key, id) => saveHorizons({ ...horizons, [key]: (horizons[key] || []).filter((x) => x.id !== id) });
@@ -1645,6 +1716,7 @@ export default function App() {
     { section: "Higher Horizons" },
     { id: "areas", label: "Areas of Focus", icon: Compass, count: areas.length },
     { id: "horizons", label: "Goals · Vision · Purpose", icon: Mountain },
+    { id: "canopy", label: "The Canopy", icon: TreePine },
     { section: "Practice" },
     { id: "habits", label: "Habits", icon: Repeat, count: habits.length },
     { id: "review", label: "Weekly Review", icon: ListChecks },
@@ -1768,8 +1840,9 @@ export default function App() {
           {view === "habits" && <HabitsView {...{ habits, log, toggleLog, addHabit, deleteHabit, updateHabit, purposes: horizons.purpose || [], setView }} />}
           {view === "review" && <ReviewView {...{ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, gate: reviewAllowed() }} />}
           {view === "archive" && <ArchiveView {...{ completedItems, completedProjects, projName, restoreItem, deleteItem, reactivateProject, deleteProject }} />}
-          {view === "areas" && <AreasView {...{ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit: setEditId, horizons, setView }} />}
+          {view === "areas" && <AreasView {...{ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit: setEditId, horizons, items, setView }} />}
           {view === "horizons" && <HorizonsView {...{ horizons, areas, addHorizon, updateHorizon, deleteHorizon, setView, setOpenArea }} />}
+          {view === "canopy" && <CanopyView {...{ horizons, areas, projects: activeProjects, items, setView, setOpenArea }} />}
         </div>
       </main>
 
@@ -1779,8 +1852,16 @@ export default function App() {
       </div>
 
       {clarifyItem && (
-        <Clarify item={clarifyItem} contexts={contexts} onClose={() => setClarifyId(null)}
-          onTransform={handleTransform} onDelete={(id) => { deleteItem(id); setClarifyId(null); }} />
+        <Clarify item={clarifyItem} contexts={contexts} projects={activeProjects} areas={areas}
+          onCreateProject={(title, areaId) => {
+            const pid = uid();
+            saveProjects([{ id: pid, title, outcome: "", notes: "", status: "active", areaId: areaId || null, createdAt: Date.now() }, ...projects]);
+            setExpanded((e) => ({ ...e, [pid]: true }));
+            return pid;
+          }}
+          onClose={() => setClarifyId(null)}
+          onTransform={handleTransform}
+          onDelete={(id) => { deleteItem(id); setClarifyId(null); }} />
       )}
       {editItem && (
         <EditItem item={editItem} contexts={contexts} onClose={() => setEditId(null)}
@@ -2582,7 +2663,7 @@ function ArchiveView({ completedItems, completedProjects, projName, restoreItem,
   );
 }
 
-function AreasView({ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, toggleDone, openArea, setOpenArea, onEdit, horizons, setView }) {
+function AreasView({ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit, horizons, items, setView }) {
   const [na, setNa] = useState("");
   const projectsIn = (aid) => activeProjects.filter((p) => p.areaId === aid);
   const goalsIn = (aid) => (horizons.goals || []).filter((g) => g.areaId === aid);
@@ -2657,6 +2738,22 @@ function AreasView({ areas, projects, activeProjects, projectNexts, isBlocked, a
                         </div>
                       );
                     })}
+                  {(() => {
+                    const standaloneActs = (items || []).filter((i) => i.areaId === a.id && !i.projectId && i.type === "next" && !i.done);
+                    if (!standaloneActs.length) return null;
+                    return (
+                      <div style={{ marginTop: 14 }}>
+                        <div className="mono" style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 1, marginBottom: 8 }}>STANDALONE ACTIONS</div>
+                        {standaloneActs.map((i) => (
+                          <div key={i.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "5px 0" }}>
+                            <div className="checkbox" style={{ width: 17, height: 17 }} onClick={() => toggleDone(i.id)} />
+                            <span style={{ flex: 1, fontSize: 13, cursor: "pointer" }} onClick={() => onEdit(i.id)}>{i.title}</span>
+                            {i.context && <span className="pill pill-ctx">{i.context}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -2696,40 +2793,72 @@ function HorizonHeading({ icon, color, code, title, blurb }) {
   );
 }
 
-function HorizonList({ hkey, list, areas, addHorizon, updateHorizon, deleteHorizon, withArea }) {
+function HorizonList({ hkey, list, areas, visions, purposes, addHorizon, updateHorizon, deleteHorizon, withArea }) {
   const [t, setT] = useState("");
   const [aid, setAid] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [editText, setEditText] = useState("");
+
   const areaName = (id) => areas.find((a) => a.id === id)?.title;
+  const parentLinkField = hkey === "goals" ? "visionId" : hkey === "vision" ? "purposeId" : null;
+  const parentList = hkey === "goals" ? (visions || []) : hkey === "vision" ? (purposes || []) : [];
+  const parentLabel = hkey === "goals" ? "Vision" : hkey === "vision" ? "Purpose" : null;
+
   const submit = () => { addHorizon(hkey, t, withArea ? aid : null); setT(""); };
+  const startEdit = (x) => { setEditId(x.id); setEditText(x.text); };
+  const saveEdit = (x) => { if (editText.trim()) updateHorizon(hkey, x.id, { text: editText.trim() }); setEditId(null); };
+
   return (
     <div className="card" style={{ padding: 14, marginBottom: 18 }}>
       {(list || []).length > 0 && (
         <div style={{ marginBottom: 12 }}>
-          {list.map((x) => (
-            <div key={x.id} className="row act-row" style={{ padding: "8px 0", alignItems: "flex-start" }}>
+          {(list || []).map((x) => (
+            <div key={x.id} style={{ padding: "8px 0", borderBottom: "1px solid var(--line2)", display: "flex", gap: 8, alignItems: "flex-start" }}>
               <ChevronRight size={14} color="var(--muted)" style={{ marginTop: 3, flexShrink: 0 }} />
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 14 }}>{x.text}</div>
-                {withArea && x.areaId && areaName(x.areaId) && (
-                  <div className="mono" style={{ fontSize: 10.5, color: "var(--pine)", marginTop: 3 }}><Compass size={9} style={{ verticalAlign: -1 }} /> {areaName(x.areaId)}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {editId === x.id ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "flex-start" }}>
+                    <textarea className="input" rows={2} autoFocus style={{ flex: 1, fontSize: 13.5, resize: "vertical" }}
+                      value={editText} onChange={(e) => setEditText(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); saveEdit(x); } }} />
+                    <button className="btn btn-accent btn-sm" onClick={() => saveEdit(x)}><Check size={13} /></button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setEditId(null)}><X size={13} /></button>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 14, lineHeight: 1.4 }}>{x.text}</div>
                 )}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4, alignItems: "center" }}>
+                  {withArea && (
+                    <select className="input" style={{ padding: "2px 6px", fontSize: 11, width: "auto", minWidth: 110 }}
+                      value={x.areaId || ""} onChange={(e) => updateHorizon(hkey, x.id, { areaId: e.target.value || null })}>
+                      <option value="">— area —</option>
+                      {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
+                    </select>
+                  )}
+                  {parentLinkField && parentList.length > 0 && (
+                    <select className="input" style={{ padding: "2px 6px", fontSize: 11, width: "auto", minWidth: 130 }}
+                      value={x[parentLinkField] || ""} onChange={(e) => updateHorizon(hkey, x.id, { [parentLinkField]: e.target.value || null })}>
+                      <option value="">— {parentLabel} —</option>
+                      {parentList.map((p) => <option key={p.id} value={p.id}>{p.text.length > 40 ? p.text.slice(0, 40) + "…" : p.text}</option>)}
+                    </select>
+                  )}
+                </div>
               </div>
-              {withArea && (
-                <select className="input" style={{ width: 120, padding: "4px 7px", fontSize: 11.5 }} value={x.areaId || ""} onChange={(e) => updateHorizon(hkey, x.id, { areaId: e.target.value || null })}>
-                  <option value="">— link area —</option>
-                  {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
-                </select>
+              {editId !== x.id && (
+                <div style={{ display: "flex", gap: 4, flexShrink: 0, marginTop: 2 }}>
+                  <button className="btn btn-ghost btn-sm edit-btn" title="Edit" onClick={() => startEdit(x)}><Pencil size={12} /></button>
+                  <button className="btn btn-ghost btn-sm edit-btn btn-danger" title="Delete" onClick={() => deleteHorizon(hkey, x.id)}><Trash2 size={12} /></button>
+                </div>
               )}
-              <button className="btn btn-ghost btn-sm edit-btn btn-danger" onClick={() => deleteHorizon(hkey, x.id)}><Trash2 size={12} /></button>
             </div>
           ))}
         </div>
       )}
-      <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginTop: 4 }}>
         <input className="input" style={{ flex: 1, minWidth: 180 }} placeholder="Add a statement…" value={t}
           onChange={(e) => setT(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
         {withArea && areas.length > 0 && (
-          <select className="input" style={{ width: 140 }} value={aid} onChange={(e) => setAid(e.target.value)}>
+          <select className="input" style={{ width: 130 }} value={aid} onChange={(e) => setAid(e.target.value)}>
             <option value="">— no area —</option>
             {areas.map((a) => <option key={a.id} value={a.id}>{a.title}</option>)}
           </select>
@@ -2740,19 +2869,285 @@ function HorizonList({ hkey, list, areas, addHorizon, updateHorizon, deleteHoriz
   );
 }
 
+/* ============================================================================
+   THE CANOPY — full hierarchy tree view (H5 → H4 → H3 → H2 → H1 → Actions)
+============================================================================ */
+const CANOPY_STORE_KEY = "clearmind-canopy-view";
+
+function CanopyView({ horizons, areas, projects, items, setView, setOpenArea }) {
+  const [mode, setMode] = useState(() => {
+    try { return localStorage.getItem(CANOPY_STORE_KEY) || "outline"; } catch { return "outline"; }
+  });
+  const switchMode = (m) => {
+    setMode(m);
+    try { localStorage.setItem(CANOPY_STORE_KEY, m); } catch {}
+  };
+
+  // Build the tree once from all slices
+  const tree = useMemo(() => {
+    const goals  = horizons.goals  || [];
+    const visions = horizons.vision || [];
+    const purposes = horizons.purpose || [];
+
+    const areaMap  = Object.fromEntries((areas    || []).map((a) => [a.id, a]));
+    const projMap  = Object.fromEntries((projects || []).map((p) => [p.id, p]));
+
+    // Build area children (projects + standalone actions) per area
+    const areaChildren = (areaId) => {
+      const ps = (projects || []).filter((p) => p.areaId === areaId);
+      const standalone = (items || []).filter((i) => i.areaId === areaId && !i.projectId && i.type === "next" && !i.done);
+      return {
+        projects: ps.map((p) => ({
+          id: p.id, label: p.title, level: 1, type: "project",
+          children: (items || []).filter((i) => i.projectId === p.id && i.type === "next" && !i.done)
+            .map((i) => ({ id: i.id, label: i.title, level: 0, type: "action", children: [] })),
+        })),
+        standalone: standalone.map((i) => ({ id: i.id, label: i.title, level: 0, type: "action", children: [] })),
+      };
+    };
+
+    // Build goal node (H3)
+    const goalNode = (g) => {
+      const area = g.areaId ? areaMap[g.areaId] : null;
+      const ac = area ? areaChildren(area.id) : { projects: [], standalone: [] };
+      return {
+        id: g.id, label: g.text, level: 3, type: "goal",
+        areaId: g.areaId,
+        children: area ? [{
+          id: area.id, label: area.title, level: 2, type: "area",
+          children: [...ac.projects, ...ac.standalone],
+        }] : [],
+      };
+    };
+
+    // Build vision node (H4)
+    const visionNode = (v) => ({
+      id: v.id, label: v.text, level: 4, type: "vision",
+      children: goals.filter((g) => g.visionId === v.id).map(goalNode),
+    });
+
+    // Build purpose node (H5)
+    const purposeNode = (p) => ({
+      id: p.id, label: p.text, level: 5, type: "purpose",
+      children: visions.filter((v) => v.purposeId === p.id).map(visionNode),
+    });
+
+    const purposeNodes = purposes.map(purposeNode);
+
+    // Collect orphan visions (no purpose / purpose not found)
+    const linkedVisionIds = new Set(visions.filter((v) => v.purposeId && purposes.find((p) => p.id === v.purposeId)).map((v) => v.id));
+    const orphanVisions = visions.filter((v) => !linkedVisionIds.has(v.id)).map(visionNode);
+
+    // Collect orphan goals (no vision / vision not found)
+    const linkedGoalIds = new Set(goals.filter((g) => g.visionId && visions.find((v) => v.id === g.visionId)).map((g) => g.id));
+    const orphanGoals = goals.filter((g) => !linkedGoalIds.has(g.id)).map(goalNode);
+
+    // Collect orphan areas (not referenced by any goal)
+    const referencedAreaIds = new Set(goals.map((g) => g.areaId).filter(Boolean));
+    const orphanAreas = (areas || []).filter((a) => !referencedAreaIds.has(a.id)).map((a) => {
+      const ac = areaChildren(a.id);
+      return { id: a.id, label: a.title, level: 2, type: "area", children: [...ac.projects, ...ac.standalone] };
+    });
+
+    return { purposeNodes, orphanVisions, orphanGoals, orphanAreas };
+  }, [horizons, areas, projects, items]);
+
+  const navigateTo = (node) => {
+    if (node.type === "purpose" || node.type === "vision" || node.type === "goal") setView("horizons");
+    else if (node.type === "area") { setView("areas"); setOpenArea(node.id); }
+    else if (node.type === "project") setView("projects");
+    else if (node.type === "action") setView("today");
+  };
+
+  const levelColors = { 5: "var(--clay)", 4: "var(--pine)", 3: "var(--amber)", 2: "var(--ink2)", 1: "var(--muted)", 0: "var(--muted)" };
+  const levelLabels = { 5: "H5 PURPOSE", 4: "H4 VISION", 3: "H3 GOAL", 2: "H2 AREA", 1: "H1 PROJECT", 0: "ACTION" };
+
+  return (
+    <div className="stagger">
+      <SectionTitle sub="Your full hierarchy — from purpose down to actions. A quiet map of how your work connects.">
+        The Canopy
+      </SectionTitle>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 18, alignItems: "center" }}>
+        <Pill on={mode === "outline"} onClick={() => switchMode("outline")}>Outline</Pill>
+        <Pill on={mode === "map"} onClick={() => switchMode("map")}>Map</Pill>
+      </div>
+
+      {mode === "outline"
+        ? <CanopyOutline tree={tree} navigateTo={navigateTo} levelColors={levelColors} levelLabels={levelLabels} />
+        : <CanopyMap tree={tree} navigateTo={navigateTo} levelColors={levelColors} />}
+    </div>
+  );
+}
+
+function CanopyOutline({ tree, navigateTo, levelColors, levelLabels }) {
+  const [collapsed, setCollapsed] = useState({});
+  const toggle = (id) => setCollapsed((p) => ({ ...p, [id]: !p[id] }));
+
+  const renderNode = (node, depth = 0) => {
+    const hasChildren = node.children && node.children.length > 0;
+    const isCollapsed = collapsed[node.id];
+    const color = levelColors[node.level] || "var(--muted)";
+    return (
+      <div key={node.id}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "5px 0", paddingLeft: depth * 18 }}>
+          {hasChildren ? (
+            <button className="btn btn-ghost" style={{ padding: 2, flexShrink: 0, marginTop: 1 }} onClick={() => toggle(node.id)}>
+              {isCollapsed ? <ChevronRight size={13} color="var(--muted)" /> : <ChevronDown size={13} color="var(--muted)" />}
+            </button>
+          ) : (
+            <div style={{ width: 21, flexShrink: 0 }} />
+          )}
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, flex: 1, cursor: "pointer" }} onClick={() => navigateTo(node)}>
+            <span className="mono" style={{ fontSize: 9, color, letterSpacing: 0.5, flexShrink: 0, paddingTop: 2 }}>{levelLabels[node.level]}</span>
+            <span style={{ fontSize: 13.5, color: "var(--ink)", lineHeight: 1.4 }}>{node.label}</span>
+          </div>
+        </div>
+        {hasChildren && !isCollapsed && node.children.map((c) => renderNode(c, depth + 1))}
+      </div>
+    );
+  };
+
+  const hasContent = tree.purposeNodes.length || tree.orphanVisions.length || tree.orphanGoals.length || tree.orphanAreas.length;
+
+  return (
+    <div className="card" style={{ padding: 14 }}>
+      {!hasContent && <div style={{ fontSize: 13, color: "var(--muted)", padding: "8px 0" }}>Add purposes, visions, and goals in Goals · Vision · Purpose to build your tree.</div>}
+      {tree.purposeNodes.map((n) => renderNode(n))}
+      {tree.orphanVisions.length > 0 && (
+        <>
+          <div className="mono" style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 1, marginTop: 14, marginBottom: 4 }}>NOT YET LINKED TO A PURPOSE</div>
+          {tree.orphanVisions.map((n) => renderNode(n))}
+        </>
+      )}
+      {tree.orphanGoals.length > 0 && (
+        <>
+          <div className="mono" style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 1, marginTop: 14, marginBottom: 4 }}>NOT YET LINKED TO A VISION</div>
+          {tree.orphanGoals.map((n) => renderNode(n))}
+        </>
+      )}
+      {tree.orphanAreas.length > 0 && (
+        <>
+          <div className="mono" style={{ fontSize: 10, color: "var(--muted)", letterSpacing: 1, marginTop: 14, marginBottom: 4 }}>AREAS NOT REFERENCED BY A GOAL</div>
+          {tree.orphanAreas.map((n) => renderNode(n))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function CanopyMap({ tree, navigateTo, levelColors }) {
+  const isNarrow = typeof window !== "undefined" && window.innerWidth <= 760;
+  const NODE_W = 150, NODE_H = 44, H_GAP = 14, V_GAP = 56;
+
+  // Flatten tree into a list of {node, depth} for layout
+  const allTrees = [
+    ...tree.purposeNodes,
+    ...tree.orphanVisions,
+    ...tree.orphanGoals,
+    ...tree.orphanAreas,
+  ];
+
+  // Layout: assign x,y to every node using a post-order subtree-width algorithm
+  const layoutNodes = useMemo(() => {
+    const placed = [];
+    let cursor = 0;
+
+    const layout = (node, depth) => {
+      const entry = { node, depth, x: 0, y: depth * (NODE_H + V_GAP) };
+      if (!node.children || !node.children.length) {
+        entry.x = cursor;
+        cursor += NODE_W + H_GAP;
+        placed.push(entry);
+        return entry;
+      }
+      const childEntries = node.children.map((c) => layout(c, depth + 1));
+      entry.x = (childEntries[0].x + childEntries[childEntries.length - 1].x) / 2;
+      placed.push(entry);
+      return entry;
+    };
+
+    allTrees.forEach((root) => { layout(root, 0); cursor += H_GAP * 2; });
+
+    return placed;
+  }, [allTrees]);
+
+  const totalW = Math.max(600, layoutNodes.reduce((m, e) => Math.max(m, e.x + NODE_W), 0) + H_GAP);
+  const totalH = layoutNodes.reduce((m, e) => Math.max(m, e.y + NODE_H), 0) + 40;
+
+  // Build edges: parent → children
+  const edges = useMemo(() => {
+    const nodePos = Object.fromEntries(layoutNodes.map((e) => [e.node.id, e]));
+    const lines = [];
+    const walk = (node) => {
+      if (!node.children) return;
+      node.children.forEach((child) => {
+        const p = nodePos[node.id];
+        const c = nodePos[child.id];
+        if (p && c) {
+          const x1 = p.x + NODE_W / 2, y1 = p.y + NODE_H;
+          const x2 = c.x + NODE_W / 2, y2 = c.y;
+          const mid = (y1 + y2) / 2;
+          lines.push({ key: `${node.id}-${child.id}`, d: `M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2}` });
+        }
+        walk(child);
+      });
+    };
+    allTrees.forEach(walk);
+    return lines;
+  }, [layoutNodes, allTrees]);
+
+  if (isNarrow) {
+    return (
+      <div>
+        <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 10 }}>Map mode works best on larger screens. Showing outline instead.</div>
+        <CanopyOutline tree={tree} navigateTo={navigateTo} levelColors={levelColors} levelLabels={{ 5: "H5 PURPOSE", 4: "H4 VISION", 3: "H3 GOAL", 2: "H2 AREA", 1: "H1 PROJECT", 0: "ACTION" }} />
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ overflowX: "auto", overflowY: "auto", borderRadius: 10, border: "1px solid var(--line)", background: "var(--paper2)", padding: 16 }}>
+      <svg width={totalW} height={totalH} style={{ display: "block" }}>
+        {edges.map((e) => (
+          <path key={e.key} d={e.d} fill="none" stroke="var(--line)" strokeWidth={1.5} />
+        ))}
+        {layoutNodes.map(({ node, x, y }) => {
+          const color = levelColors[node.level] || "var(--muted)";
+          return (
+            <g key={node.id} style={{ cursor: "pointer" }} onClick={() => navigateTo(node)}>
+              <rect x={x} y={y} width={NODE_W} height={NODE_H} rx={8} ry={8}
+                fill="var(--card)" stroke={color} strokeWidth={1.5} />
+              <text x={x + NODE_W / 2} y={y + 14} textAnchor="middle"
+                fontSize={9} fill={color} fontFamily="IBM Plex Mono" letterSpacing={0.5}>
+                {({ 5: "PURPOSE", 4: "VISION", 3: "GOAL", 2: "AREA", 1: "PROJECT", 0: "ACTION" })[node.level] || ""}
+              </text>
+              <foreignObject x={x + 6} y={y + 18} width={NODE_W - 12} height={NODE_H - 20}>
+                <div xmlns="http://www.w3.org/1999/xhtml" style={{ fontSize: 11.5, color: "var(--ink)", overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 1, WebkitBoxOrient: "vertical", lineHeight: 1.35 }}>
+                  {node.label}
+                </div>
+              </foreignObject>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function HorizonsView({ horizons, areas, addHorizon, updateHorizon, deleteHorizon }) {
   return (
     <div className="stagger">
       <SectionTitle sub="The higher altitudes. These aren't task lists — they're statements you read during review to keep everything below them pointed in the right direction.">Goals · Vision · Purpose <span className="subq">THE SIGNAL</span></SectionTitle>
 
-      <HorizonHeading icon={Target} color="var(--amber)" code="H3" title="Goals" blurb="What you want to accomplish in the next 1–2 years. Link each to the area it serves." />
-      <HorizonList hkey="goals" list={horizons.goals} areas={areas} addHorizon={addHorizon} updateHorizon={updateHorizon} deleteHorizon={deleteHorizon} withArea />
+      <HorizonHeading icon={Target} color="var(--amber)" code="H3" title="Goals" blurb="What you want to accomplish in the next 1–2 years. Link each to the area it serves and the vision it advances." />
+      <HorizonList hkey="goals" list={horizons.goals} areas={areas} visions={horizons.vision} purposes={horizons.purpose} addHorizon={addHorizon} updateHorizon={updateHorizon} deleteHorizon={deleteHorizon} withArea />
 
-      <HorizonHeading icon={Mountain} color="var(--pine)" code="H4" title="Vision" blurb="Where you're headed in 3–5 years — the longer arc your goals ladder up to." />
-      <HorizonList hkey="vision" list={horizons.vision} areas={areas} addHorizon={addHorizon} updateHorizon={updateHorizon} deleteHorizon={deleteHorizon} />
+      <HorizonHeading icon={Mountain} color="var(--pine)" code="H4" title="Vision" blurb="Where you're headed in 3–5 years — the longer arc your goals ladder up to. Link each to the purpose it serves." />
+      <HorizonList hkey="vision" list={horizons.vision} areas={areas} visions={horizons.vision} purposes={horizons.purpose} addHorizon={addHorizon} updateHorizon={updateHorizon} deleteHorizon={deleteHorizon} />
 
       <HorizonHeading icon={Sparkles} color="var(--clay)" code="H5" title="Purpose & Principles" blurb="Why any of it matters, and the standards you hold. The view from the top." />
-      <HorizonList hkey="purpose" list={horizons.purpose} areas={areas} addHorizon={addHorizon} updateHorizon={updateHorizon} deleteHorizon={deleteHorizon} />
+      <HorizonList hkey="purpose" list={horizons.purpose} areas={areas} visions={horizons.vision} purposes={horizons.purpose} addHorizon={addHorizon} updateHorizon={updateHorizon} deleteHorizon={deleteHorizon} />
     </div>
   );
 }
