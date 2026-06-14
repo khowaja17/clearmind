@@ -4,7 +4,8 @@ import {
   CheckCircle2, Plus, Trash2, Calendar, ChevronRight, ChevronDown,
   Check, X, Download, Upload, RotateCcw, Flame, Sparkles, ArrowRight,
   AlertTriangle, Sun, ListChecks, Send, Clipboard, Filter, Pencil, Settings2,
-  Archive, Lock, Link2, Compass, Mountain, Target, Radar, ShoppingBag, Skull, Crosshair, Shield, Menu
+  Archive, Lock, Link2, Compass, Mountain, Target, ShoppingBag, Shield, Menu,
+  Leaf, Timer
 } from "lucide-react";
 import { syncEnabled } from "./supabaseClient.js";
 import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave, subscribeRealtime } from "./cloudSync.js";
@@ -25,6 +26,7 @@ const KEYS = {
   horizons: "gtd:horizons",
   game: "gtd:game",
   meta: "gtd:meta",
+  plants: "gtd:plants",
 };
 const hasSandbox = typeof window !== "undefined" && window.storage;
 const hasLocal = (() => {
@@ -73,7 +75,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -192,6 +194,25 @@ const MIGRATIONS = {
       "iPad layout fixed — proper safe areas on all sides in both portrait and landscape.",
       "Pixel-art avatars now render crisply on all devices including high-DPI Retina screens.",
     ],
+  },
+  15: {
+    notes: [
+      "Welcome to the Greenhouse — Clearmind is now a calm, growth-focused system. No threats, no decay, only forward momentum.",
+      "Your first plant is waiting: a Pothos cutting has been added to your greenhouse. Keep it growing with focus sessions.",
+      "New Focus Timer — start any Next Action to enter focused work mode. Every minute you focus earns your plant one XP.",
+      "Plants evolve through four stages as they earn focus XP — from a cutting to a lush, mature specimen.",
+      "Seeds (❀) replace the old currency glyph. Your balance is unchanged.",
+    ],
+    migrate: (all) => {
+      const game = { ...(all.game || {}) };
+      delete game.inSiege;
+      delete game.siegeBrokenAt;
+      const plants = all.plants || {
+        active: "plant-starter",
+        owned: [{ id: "plant-starter", species: "pothos", xp: 0, stage: 0, maxed: false, plantedAt: Date.now(), nickname: null }],
+      };
+      return { ...all, game, plants };
+    },
   },
 };
 
@@ -313,7 +334,7 @@ function habitRate(habit, log, window = 30) {
 }
 
 /* ============================================================================
-   SURVIVAL LAYER — game engine (pure functions, no storage, no UI)
+   GAME ENGINE (pure functions, no storage, no UI)
 ============================================================================ */
 const ENERGY_F = { low: 1.0, medium: 1.5, high: 2.2 };
 const TIME_F = { "5m": 1.0, "15m": 1.3, "30m": 1.7, "1h": 2.2, "2h+": 3.0 };
@@ -331,46 +352,6 @@ function actionWeight(item, items) {
 const actionXP = (w) => Math.round(5 * w);
 const actionGTD = (w) => Math.round(2 * w);
 
-// difficulty tier from weight → drives encounter tone
-function toneTier(w) {
-  if (w < 1.5) return "trivial";
-  if (w < 4) return "standard";
-  if (w < 7) return "serious";
-  return "severe";
-}
-const TONE_META = {
-  trivial:  { label: "straggler", color: "var(--t-secure)", sigil: "·" },
-  standard: { label: "walker",    color: "var(--t-unsettled)", sigil: "›" },
-  serious:  { label: "fed",       color: "var(--t-threatened)", sigil: "»" },
-  severe:   { label: "brute",     color: "var(--t-overrun)", sigil: "✦" },
-};
-const TONE_LINES = {
-  trivial: [
-    "Something shuffles at the fence. Trips over its own feet.",
-    "A lone one out past the wire. Barely worth the bullet.",
-    "Easy. It hasn't even noticed you yet.",
-  ],
-  standard: [
-    "A few in the field. Nothing you haven't handled.",
-    "Steady now — they're moving, but slow.",
-    "Routine clear. Keep your spacing.",
-  ],
-  serious: [
-    "This one's been fed. Move carefully.",
-    "It's bigger than the others. Watch its hands.",
-    "Don't rush this. It'll take everything you've got.",
-  ],
-  severe: [
-    "The wall's been quiet too long. Something big moved in the dark.",
-    "You hear it before you see it. That's never good.",
-    "This is the one you've been putting off. It knows.",
-  ],
-};
-function encounterLine(tier, seed = 0) {
-  const arr = TONE_LINES[tier] || TONE_LINES.standard;
-  return arr[Math.abs(seed) % arr.length];
-}
-
 // ----- Level / Rank (derive from cumulative XP; only ever climbs) -----
 // Triangular base × a mild late-game accelerator → noticeably grindier than a flat curve.
 const xpForLevel = (L) => Math.round(200 * L * (L + 1) / 2 * (1 + 0.12 * (L - 1))); // cumulative XP to reach level L+1
@@ -386,9 +367,9 @@ function levelProgress(xp) {
   return { level: L, floor, ceil, inLevel: xp - floor, span: ceil - floor, pct: Math.min(100, Math.round(((xp - floor) / (ceil - floor)) * 100)) };
 }
 const RANKS = [
-  { min: 1, name: "Drifter" }, { min: 3, name: "Scavenger" }, { min: 5, name: "Survivor" },
-  { min: 7, name: "Outrider" }, { min: 10, name: "Warden" }, { min: 13, name: "Quartermaster" },
-  { min: 16, name: "Vanguard" }, { min: 20, name: "Settlement Architect" },
+  { min: 1, name: "Sprout" }, { min: 3, name: "Seedling" }, { min: 5, name: "Gardener" },
+  { min: 7, name: "Cultivator" }, { min: 10, name: "Botanist" }, { min: 13, name: "Horticulturist" },
+  { min: 16, name: "Greenskeeper" }, { min: 20, name: "Master Gardener" },
 ];
 function rankFor(level) {
   let r = RANKS[0];
@@ -409,74 +390,7 @@ function statsOf(b) {
 }
 const rankTier = (level) => RANKS.filter((r) => level >= r.min).length; // 1..8, gates gear tiers
 
-// ----- Threat (0–100), computed live from system state -----
-const FORTIFY_FLOOR_DAYS = 3;
-function threatBreakdown({ items, projects, habits, log, lastReview, lastTended, siegeBrokenAt, journeyStarted }) {
-  const parts = [];
-  const today = todayStr();
-  const now = Date.now();
-
-  // inbox stragglers: +2 each, +0.5/day aged, cap +8 each
-  const inbox = items.filter((i) => i.type === "inbox");
-  let inboxT = 0;
-  inbox.forEach((i) => {
-    const age = Math.max(0, daysBetween(isoDate(new Date(i.createdAt || now)), today));
-    inboxT += Math.min(8, 2 + 0.5 * age);
-  });
-  if (inbox.length) parts.push({ key: "inbox", label: `${inbox.length} ${inbox.length === 1 ? "shape" : "shapes"} in the fog`, amt: inboxT });
-
-  // stalled projects (no actionable next action): +8 each — wall breach
-  const isBlocked = (i) => (i.blockedBy || []).some((bid) => { const b = items.find((x) => x.id === bid); return b && !b.done; });
-  const active = projects.filter((p) => p.status === "active");
-  const stalled = active.filter((p) => items.filter((i) => i.projectId === p.id && i.type === "next" && !i.done && !isBlocked(i)).length === 0 && items.some((i) => i.projectId === p.id));
-  if (stalled.length) parts.push({ key: "stalled", label: `${stalled.length} wall ${stalled.length === 1 ? "breach" : "breaches"}`, amt: stalled.length * 8 });
-
-  // overdue weekly review: the clock starts at the LATER of last review or journey start,
-  // so a brand-new survivor has no phantom backlog. Grace of 7 days, then +3/day, cap +30.
-  const anchor = lastReview || (journeyStarted ? isoDate(new Date(journeyStarted)) : today);
-  const sinceReview = daysBetween(anchor, today);
-  if (sinceReview > 7) {
-    const amt = Math.min(30, (sinceReview - 7) * 3);
-    parts.push({ key: "review", label: `fortify overdue ${sinceReview - 7}d`, amt });
-  }
-
-  // missed scheduled raids: +4 each
-  const missed = items.filter((i) => i.type === "calendar" && !i.done && i.dueDate && i.dueDate < today);
-  if (missed.length) parts.push({ key: "missed", label: `${missed.length} missed ${missed.length === 1 ? "raid" : "raids"}`, amt: missed.length * 4 });
-
-  // lapsed routines today: +1.5 each scheduled-but-undone
-  const brokenToday = habits.filter((h) => isScheduled(h, today) && !log[h.id + "|" + today]).length;
-  if (brokenToday) parts.push({ key: "habits", label: `${brokenToday} ${brokenToday === 1 ? "routine" : "routines"} unattended`, amt: brokenToday * 1.5 });
-
-  // daily upkeep: every OPEN next action costs 0.1/day to "feed" — the backlog tax.
-  // Uncapped on purpose: hoarding tasks you never finish steadily raises the threat,
-  // pushing you to either complete or cull. Completing an action removes its share.
-  const openActions = items.filter((i) => i.type === "next" && !i.done).length;
-  const upkeep = openActions * 0.1;
-  if (upkeep > 0) parts.push({ key: "upkeep", label: `upkeep on ${openActions} open ${openActions === 1 ? "action" : "actions"}`, amt: upkeep });
-
-  let raw = parts.reduce((s, p) => s + p.amt, 0);
-
-  // Fortified buffer: a recent review caps threat low for a few days
-  let fortified = false;
-  if (siegeBrokenAt) {
-    const d = daysBetween(isoDate(new Date(siegeBrokenAt)), today);
-    if (d <= FORTIFY_FLOOR_DAYS) { raw = Math.min(raw, 35); fortified = true; }
-  }
-  const value = Math.max(0, Math.min(100, Math.round(raw)));
-  return { value, parts, fortified };
-}
-
-const THREAT_BANDS = [
-  { max: 20, name: "SECURE", varc: "--t-secure" },
-  { max: 45, name: "UNSETTLED", varc: "--t-unsettled" },
-  { max: 70, name: "THREATENED", varc: "--t-threatened" },
-  { max: 99, name: "OVERRUN", varc: "--t-overrun" },
-  { max: 100, name: "UNDER SIEGE", varc: "--t-siege" },
-];
-const threatBand = (v) => THREAT_BANDS.find((b) => v <= b.max) || THREAT_BANDS[THREAT_BANDS.length - 1];
-
-// Cosmetic gear catalog (gear is visual only; rank gates tier, GTD buys item)
+// Cosmetic gear catalog (gear is visual only; rank gates tier, Seeds buy item)
 /* ============================================================================
    COSMETICS — avatars (8-bit pixel art) and themes (palette swaps)
    Avatars are drawn from compact 12-row grids: each string is a row, each char
@@ -486,31 +400,92 @@ const threatBand = (v) => THREAT_BANDS.find((b) => v <= b.max) || THREAT_BANDS[T
 // a `src` (base64 PNG — crips pixel art rendered with image-rendering:pixelated)
 // or a `grid`+`pal` (legacy SVG grid, used for placeholder entries).
 const AVATARS = [
-  { id: "av-f-survivor", name: "Survivor (F)", tier: 1, cost: 0, tile: "#2c6a55",
+  { id: "av-f-survivor", name: "Grower (F)", tier: 1, cost: 0, tile: "#2c6a55",
     src: "data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAgACADASIAAhEBAxEB/8QAGAABAQEBAQAAAAAAAAAAAAAABgcEAQP/xAAmEAACAgICAQQCAwEAAAAAAAABAgMEBREGEiEABxMxIjIIFVFh/8QAGQEAAgMBAAAAAAAAAAAAAAAAAQIAAwQF/8QAJxEAAQIFAwMFAQAAAAAAAAAAAQIDAAQRITEFBhITQVEVI2Gx0fH/2gAMAwEAAhEDEQA/AI1VhN6WVBO8MMLdJHjK/IX0G6r2BA8EEsQfsAAkkp2XHzC7FXrXrRgI7TvPCjOq+f0deq9iQPBRuvkkn8VJPks2fw96W9jLnStbZe6dVPVwuvpt/YH2P88/Q9I+I+3mZ5hx+nzLl3IcZjMI+QGOgluzwRpsqxeQhpoR1XqNhSXbXhWC+uzrU/qjU+57hQnAAxTtbFT5/kZXUv8AMq5UEbb2NWOJWxYeCUyIriSSSdShYBjqSTYKjZGiN6IIOwV8D3isvUmZGljVX7J4DoxIVtbPXfVgVP0QfJGmNY5f7C2OM8dtZy/muHNXrdO4PH68H7OqD857EcY8sP2Yb+hskAxFqk68ryK1J8RNRp3ZKq2scXSOwkbEK8cYZoujb7eN/uSDs79NtrUp9MylkqK0HIzT5qfH1WBK9YGijURuylipUwuZa1RhtvZqCGs8tSKcV3IkUkd9Mm/kDd42DK0Ue1cbAae1PBeQ5T22x2bw2JtZWi8kkMtahZSCaGRJ+zuOzp+MqiJHKMH1Cg+gCobMVbeToWaWOrGxKOoc/LHGqHYIBLsNnQ3obI2N62Nuv4r5n3XMmUwPBrWGevU1PNSzXyfGhJZT06fkp39jY8gf99Dc7cuqcV0lVNiq+Dj8tFr6UOAgHuKw0zXDEmoUuO8YuYnOcgxVez/d18Pkaq2uzu0cQTs4ctSTddTIqdY5gE1+UQjsgK5/OxNjWxjxZKSF6jSd2idFVGDNs9mLKSTttkn8m+zX+X+9vvZxnkGTwtvjvDLM+MKrYesspXbRJKAoadXY9ZF+l+/A36iWCu38qt3M5KX5reRuy25pdKvyO52zaXQG27eAAP8APT7TbHqHIXoDEYbTzKgb4zH/2Q==" },
-  { id: "av-m-survivor", name: "Survivor (M)", tier: 1, cost: 0, tile: "#3a4a63",
+  { id: "av-m-survivor", name: "Grower (M)", tier: 1, cost: 0, tile: "#3a4a63",
     src: "data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAgACADASIAAhEBAxEB/8QAGgAAAQUBAAAAAAAAAAAAAAAABwEDBQYIBP/EACkQAAIBAwMDBAEFAAAAAAAAAAECAwQFEQYSIQAHExQiMUEyI1FhgfD/xAAYAQADAQEAAAAAAAAAAAAAAAABAwUCBv/EACcRAAEDAgUDBQEAAAAAAAAAAAECAxEAIQQGEkFhBTGBInGhscHw/9oADAMBAAIRAxEAPwACamuj22mRYVzNNkIx+FxjJ/k8/wC+5Gx0dLbtMPebutRdS8KzbWqZowucYVdrqfv3M2cn8Rhd0kRq22V1fRpWUsKSQ0zSrJ+sgclVR32xlt7hVZWYqpAByTwcJPfrhSWujpa+13KnpTSwhQ4jEcsZXCuBJCchtjEckHBx8ddDmPGvuYsttL9KbWMbCfM0vEBagAg+9X2SwrTUFtrLppmOgguqBqV4L3JLMgJnCM0bSk7WWnZ0kCSROCvJ5HVdQ5aVd27xzSRbtu3dscruxk4zjOMnGcZPz1yQXzSNJUPJDbtRwT0+d7JDRK0fO05xDkcnH946eiqrXUwu9rp7+krS7y1dLT+L3EOxIVA3KsSMcZI+ujlvqL7WKKF6lJUO1zBkXubCO9YZKgu8wfP3Tldd6q32Ktt9O9tAqxIy+qQb0d4vFI0TZG0tGdpzkcDGDknR9n7X6M7k2W0alseoJ6F4YkRWoYomRVjZvCFR0PjKZfGMEEsD+OBlCm1OkNXWU0/lSGWfiqpJNsqqpAGCcgrjccfuxIx0YOw2jdP3GjShp+7V801cZm4gort6P1bO7BPFHx5CVRd2GYg7QQPgTOtvsv4pSm0abnnVzx/b0XACqCI/aKt57XaV1FLb9G0CXulpbUk8bVTWGVHMrSeSaWSpqAKeaN3VcJFGWDFWQiIMBni+U3pNTXum9a9cYLnUweqfG6cRytGrnbxkqi/HVx750Oqu3OrqOyDuJrm4W+4UKyxS111qFSWTfIskQdZFQEKIzgg/mMlQc9DyknppVMdOyjxexo9u0x44wVPK/B4I+ureUcO2HlO6xMQBvff42nmKY2kTIr//2Q==" },
-  { id: "av-f-scout",    name: "Scout (F)",    tier: 2, cost: 140,  tile: "#bd5b27", src: null },
-  { id: "av-m-ranger",   name: "Ranger (M)",   tier: 2, cost: 140,  tile: "#3f6b3a", src: null },
-  { id: "av-f-warden",   name: "Warden (F)",   tier: 4, cost: 480,  tile: "#1f4e3e", src: null },
-  { id: "av-m-warden",   name: "Warden (M)",   tier: 4, cost: 480,  tile: "#2a2a2a", src: null },
-  { id: "av-f-architect",name: "Architect (F)",tier: 6, cost: 1100, tile: "#7a2e1a", src: null },
-  { id: "av-m-architect",name: "Architect (M)",tier: 6, cost: 1100, tile: "#3a2e10", src: null },
+  { id: "av-f-scout",    name: "Forager (F)",  tier: 2, cost: 140,  tile: "#bd5b27", src: null },
+  { id: "av-m-ranger",   name: "Forager (M)",  tier: 2, cost: 140,  tile: "#3f6b3a", src: null },
+  { id: "av-f-warden",   name: "Tender (F)",   tier: 4, cost: 480,  tile: "#1f4e3e", src: null },
+  { id: "av-m-warden",   name: "Tender (M)",   tier: 4, cost: 480,  tile: "#2a2a2a", src: null },
+  { id: "av-f-architect",name: "Botanist (F)", tier: 6, cost: 1100, tile: "#7a2e1a", src: null },
+  { id: "av-m-architect",name: "Botanist (M)", tier: 6, cost: 1100, tile: "#3a2e10", src: null },
 ];
 
 // Themes recolor the whole palette (buttons + backdrop) via a class on .gtd.
 // "vars" override the base CSS variables. tier gates access, cost is in ₲.
 const THEMES = [
-  { id: "theme-settlement", name: "Settlement", tier: 1, cost: 0, swatch: "#2c6a55", vars: null },
-  { id: "theme-dusk", name: "Dusk Patrol", tier: 2, cost: 220, swatch: "#3a4a63",
+  { id: "theme-settlement", name: "Greenhouse", tier: 1, cost: 0, swatch: "#2c6a55", vars: null },
+  { id: "theme-dusk", name: "Dusk Garden", tier: 2, cost: 220, swatch: "#3a4a63",
     vars: { "--paper": "#eef0f4", "--paper2": "#e2e6ee", "--card": "#f8fafc", "--line": "#d4dae6", "--line2": "#c2cad9", "--pine": "#3a4a63", "--pine-d": "#27324a", "--pine-soft": "#dde3ef", "--clay": "#c2763a", "--clay-soft": "#f0e4d6", "--amber": "#b08518" } },
-  { id: "theme-ember", name: "Ember Watch", tier: 4, cost: 520, swatch: "#7a2e1a",
+  { id: "theme-ember", name: "Terracotta", tier: 4, cost: 520, swatch: "#7a2e1a",
     vars: { "--paper": "#f4ece6", "--paper2": "#ece0d6", "--card": "#fbf6f1", "--line": "#e3d2c4", "--line2": "#d6c0ad", "--pine": "#a23a28", "--pine-d": "#7a2418", "--pine-soft": "#f0ddd4", "--clay": "#c2762a", "--clay-soft": "#f3e4d2", "--amber": "#bf7b1a" } },
-  { id: "theme-mono", name: "Ash & Bone", tier: 3, cost: 360, swatch: "#3a3a3a",
+  { id: "theme-mono", name: "Stone & Linen", tier: 3, cost: 360, swatch: "#3a3a3a",
     vars: { "--paper": "#ecebe8", "--paper2": "#e0dfdb", "--card": "#f7f6f3", "--line": "#d8d6d0", "--line2": "#c6c4bc", "--pine": "#3a3a38", "--pine-d": "#222220", "--pine-soft": "#e0e0db", "--clay": "#8a6a4a", "--clay-soft": "#e8e2d8", "--amber": "#9a8a4a" } },
-  { id: "theme-bloom", name: "Spring Bloom", tier: 5, cost: 700, swatch: "#7a4a8a",
+  { id: "theme-bloom", name: "Wisteria", tier: 5, cost: 700, swatch: "#7a4a8a",
     vars: { "--paper": "#f3eef4", "--paper2": "#e9e1ec", "--card": "#fbf8fc", "--line": "#e0d4e6", "--line2": "#cebcd6", "--pine": "#7a4a8a", "--pine-d": "#5a3468", "--pine-soft": "#ece0f0", "--clay": "#c25a8a", "--clay-soft": "#f3dde8", "--amber": "#c08a16" } },
 ];
+
+/* ============================================================================
+   PLANT CATALOG — species definitions, stages, per-stage art
+============================================================================ */
+const PLANT_CATALOG = {
+  pothos: {
+    name: "Pothos", genus: "Epipremnum", species: "aureum",
+    blurb: "Nearly unkillable and happy in low light. Likes to trail and be forgotten about — in a good way.",
+    cost: 0, emoji: "🌿", tile: "#4a8a6a",
+    stages: [
+      { name: "Cutting",  xpToNext: 30,  src: null, tile: "#c8e6c9" },
+      { name: "Rooted",   xpToNext: 90,  src: null, tile: "#81c784" },
+      { name: "Trailing", xpToNext: 200, src: null, tile: "#4caf50" },
+      { name: "Lush",     xpToNext: null, src: null, tile: "#2e7d32" },
+    ],
+  },
+  succulent: {
+    name: "Echeveria", genus: "Echeveria", species: "elegans",
+    blurb: "Stores water in its rosette of fleshy leaves. Thrives on neglect and bright indirect light.",
+    cost: 1200, emoji: "🌵", tile: "#80b4a4",
+    stages: [
+      { name: "Offset",  xpToNext: 40,  src: null, tile: "#b2dfdb" },
+      { name: "Rosette", xpToNext: 120, src: null, tile: "#80cbc4" },
+      { name: "Clump",   xpToNext: 280, src: null, tile: "#4db6ac" },
+      { name: "Colony",  xpToNext: null, src: null, tile: "#00897b" },
+    ],
+  },
+  snake_plant: {
+    name: "Snake Plant", genus: "Dracaena", species: "trifasciata",
+    blurb: "Thrives in any light and survives months without water. A quiet, steadfast companion.",
+    cost: 1800, emoji: "🗡️", tile: "#558b2f",
+    stages: [
+      { name: "Pup",     xpToNext: 50,  src: null, tile: "#dcedc8" },
+      { name: "Cluster", xpToNext: 150, src: null, tile: "#aed581" },
+      { name: "Stand",   xpToNext: 320, src: null, tile: "#7cb342" },
+      { name: "Grove",   xpToNext: null, src: null, tile: "#558b2f" },
+    ],
+  },
+  monstera: {
+    name: "Monstera", genus: "Monstera", species: "deliciosa",
+    blurb: "The Swiss cheese plant — fenestrations open up as it matures into something truly dramatic.",
+    cost: 3000, emoji: "🌴", tile: "#2e7d32",
+    stages: [
+      { name: "Seedling",    xpToNext: 60,  src: null, tile: "#c8e6c9" },
+      { name: "Juvenile",    xpToNext: 180, src: null, tile: "#66bb6a" },
+      { name: "Fenestrated", xpToNext: 400, src: null, tile: "#388e3c" },
+      { name: "Statement",   xpToNext: null, src: null, tile: "#1b5e20" },
+    ],
+  },
+  fiddle_leaf: {
+    name: "Fiddle-Leaf Fig", genus: "Ficus", species: "lyrata",
+    blurb: "Dramatic, sculptural, and famously picky. Worth every fuss once it settles in.",
+    cost: 5000, emoji: "🍃", tile: "#3e5c2a",
+    stages: [
+      { name: "Sapling",   xpToNext: 80,  src: null, tile: "#dcedc8" },
+      { name: "Branching", xpToNext: 240, src: null, tile: "#9ccc65" },
+      { name: "Standard",  xpToNext: 520, src: null, tile: "#558b2f" },
+      { name: "Canopy",    xpToNext: null, src: null, tile: "#33691e" },
+    ],
+  },
+};
 
 /* ============================================================================
    THEME / STYLE
@@ -521,14 +496,9 @@ const STYLE = `
 .gtd { --paper:#f3efe6; --paper2:#ece7da; --card:#fbf9f4; --ink:#221f1a; --ink2:#5c554a;
   --muted:#938b7c; --line:#e2dccd; --line2:#d4cdba; --pine:#2c6a55; --pine-d:#1f4e3e;
   --clay:#bd5b27; --clay-soft:#f0e2d4; --pine-soft:#dfeae3; --amber:#c08a16;
-  --t-secure:#3f8f5f; --t-unsettled:#c0a015; --t-threatened:#cf7b1e; --t-overrun:#c0392b; --t-siege:#7a1a12;
   font-family:'IBM Plex Sans',sans-serif; color:var(--ink); background:var(--paper);
   -webkit-font-smoothing:antialiased; }
-.gtd.siege { --paper:#231a18; --paper2:#2c1f1c; --card:#2a201d; --ink:#f0e6e2; --ink2:#c7b3ac;
-  --muted:#9c8077; --line:#3d2c27; --line2:#4a342e; --pine:#a23a28; --pine-d:#7a1a12;
-  --pine-soft:#3a221d; --clay:#d8643a; --clay-soft:#3a221d; }
 .gtd * { box-sizing:border-box; }
-.gtd.siege * { transition:background .4s, color .4s, border-color .4s; }
 .serif { font-family:'Newsreader',serif; }
 .mono { font-family:'IBM Plex Mono',monospace; }
 .gtd ::-webkit-scrollbar { width:9px; height:9px; }
@@ -543,13 +513,8 @@ const STYLE = `
   border-bottom:1px solid var(--line); background:var(--card); transition:background .14s; user-select:none; }
 .strip:hover { background:var(--paper2); }
 .strip .seg { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--ink2); }
-.threat-bar { height:7px; border-radius:6px; background:var(--paper2); overflow:hidden; position:relative; }
-.threat-bar > i { display:block; height:100%; border-radius:6px; transition:width .5s ease, background .3s; }
 .xp-bar { height:5px; border-radius:6px; background:var(--paper2); overflow:hidden; }
 .xp-bar > i { display:block; height:100%; background:var(--amber); border-radius:6px; transition:width .5s ease; }
-.gtd-glyph { display:inline-block; position:relative; font-weight:600; font-family:'IBM Plex Mono',monospace; }
-.gtd-glyph::before { content:""; position:absolute; left:50%; top:8%; bottom:8%; width:1px; background:currentColor; transform:translateX(-2.5px); }
-.gtd-glyph::after { content:""; position:absolute; left:50%; top:8%; bottom:8%; width:1px; background:currentColor; transform:translateX(0.5px); }
 .gear-card { border:1px solid var(--line2); border-radius:11px; padding:12px; background:var(--card); display:flex; flex-direction:column; gap:8px; }
 .gear-card.equipped { border-color:var(--pine); box-shadow:0 0 0 2px var(--pine-soft); }
 .gear-card.locked { opacity:.55; }
@@ -999,8 +964,11 @@ export default function App() {
   const [settings, setSettings] = useState({ contexts: DEFAULT_CONTEXTS, lastReview: null });
   const [areas, setAreas] = useState([]);
   const [horizons, setHorizons] = useState({ goals: [], vision: [], purpose: [] });
-  const [game, setGame] = useState({ xp: 0, gtd: 0, ownedCosmetics: ["av-f-survivor", "av-m-survivor", "theme-settlement"], equipped: { avatar: "av-f-survivor", theme: "theme-settlement" }, lastTended: null, siegeBrokenAt: null, inSiege: false });
+  const [game, setGame] = useState({ xp: 0, gtd: 0, ownedCosmetics: ["av-f-survivor", "av-m-survivor", "theme-settlement"], equipped: { avatar: "av-f-survivor", theme: "theme-settlement" }, lastTended: null });
+  const [plants, setPlants] = useState({ active: "plant-starter", owned: [{ id: "plant-starter", species: "pothos", xp: 0, stage: 0, maxed: false, plantedAt: Date.now(), nickname: null }] });
   const [toasts, setToasts] = useState([]);
+  const [focusItemId, setFocusItemId] = useState(null);
+  const [evolutionData, setEvolutionData] = useState(null);
 
   const [view, setView] = useState("today");
   const [capture, setCapture] = useState("");
@@ -1033,7 +1001,7 @@ export default function App() {
   // stateRef always holds the latest committed values of every data slice.
   // snapshot() reads from here so it's never one render behind (the stale
   // closure problem that caused pushed data to be missing the latest change).
-  const stateRef = useRef({ items:[], projects:[], habits:[], log:{}, settings:{ contexts: DEFAULT_CONTEXTS, lastReview: null }, areas:[], horizons:{ goals:[], vision:[], purpose:[] }, game:{ xp:0, gtd:0, ownedCosmetics:["av-f-survivor","av-m-survivor","theme-settlement"], equipped:{ avatar:"av-f-survivor", theme:"theme-settlement" }, lastTended:null, siegeBrokenAt:null, inSiege:false }, meta:{ version: APP_VERSION, name:"" } });
+  const stateRef = useRef({ items:[], projects:[], habits:[], log:{}, settings:{ contexts: DEFAULT_CONTEXTS, lastReview: null }, areas:[], horizons:{ goals:[], vision:[], purpose:[] }, game:{ xp:0, gtd:0, ownedCosmetics:["av-f-survivor","av-m-survivor","theme-settlement"], equipped:{ avatar:"av-f-survivor", theme:"theme-settlement" }, lastTended:null }, plants:{ active:"plant-starter", owned:[{ id:"plant-starter", species:"pothos", xp:0, stage:0, maxed:false, plantedAt:Date.now(), nickname:null }] }, meta:{ version: APP_VERSION, name:"" } });
 
   // ---- load (with version detection + migrations) ----
   useEffect(() => {
@@ -1047,7 +1015,8 @@ export default function App() {
         settings: await store.load(KEYS.settings, { contexts: DEFAULT_CONTEXTS, lastReview: null }),
         areas: await store.load(KEYS.areas, []),
         horizons: await store.load(KEYS.horizons, { goals: [], vision: [], purpose: [] }),
-        game: await store.load(KEYS.game, { xp: 0, gtd: 0, ownedCosmetics: ["av-f-survivor", "av-m-survivor", "theme-settlement"], equipped: { avatar: "av-f-survivor", theme: "theme-settlement" }, lastTended: null, siegeBrokenAt: null, inSiege: false }),
+        game: await store.load(KEYS.game, { xp: 0, gtd: 0, ownedCosmetics: ["av-f-survivor", "av-m-survivor", "theme-settlement"], equipped: { avatar: "av-f-survivor", theme: "theme-settlement" }, lastTended: null }),
+        plants: await store.load(KEYS.plants, { active: "plant-starter", owned: [{ id: "plant-starter", species: "pothos", xp: 0, stage: 0, maxed: false, plantedAt: Date.now(), nickname: null }] }),
       };
       const savedMeta = await store.load(KEYS.meta, null);
 
@@ -1092,7 +1061,7 @@ export default function App() {
   //   3. Realtime uses the payload data directly — no re-fetch, no XP compare,
   //      just apply what the other device already saved.
 
-  const xpOf = (b) => (b?.game?.xp) || 0;
+  const xpOf = (b) => (b?.game?.xp || 0) + ((b?.plants?.owned || []).reduce((s, p) => s + (p.xp || 0), 0));
   // Content count used as tiebreaker when XP is equal — catches inbox items,
   // projects, areas, and waiting-for entries which don't generate XP.
   const countOf = (b) => (b?.items?.length || 0) + (b?.projects?.length || 0) + (b?.areas?.length || 0);
@@ -1102,9 +1071,11 @@ export default function App() {
   function applyLoaded(d) {
     setItems(d.items); setProjects(d.projects); setHabits(d.habits); setLog(d.log);
     setSettings(d.settings); setAreas(d.areas); setHorizons(d.horizons); setGame(d.game);
+    if (d.plants) setPlants(d.plants);
     // seed stateRef so snapshot() is immediately correct after load
     stateRef.current = { items: d.items, projects: d.projects, habits: d.habits, log: d.log,
-      settings: d.settings, areas: d.areas, horizons: d.horizons, game: d.game, meta: stateRef.current.meta };
+      settings: d.settings, areas: d.areas, horizons: d.horizons, game: d.game,
+      plants: d.plants || stateRef.current.plants, meta: stateRef.current.meta };
   }
 
   // Guard: true while we're applying a cloud blob. The push-on-change effect
@@ -1114,13 +1085,14 @@ export default function App() {
   const applyBlob = (blob) => {
     let b = { items: blob.items||[], projects: blob.projects||[], habits: blob.habits||[],
       log: blob.log||{}, settings: blob.settings||{ contexts: DEFAULT_CONTEXTS, lastReview: null },
-      areas: blob.areas||[], horizons: blob.horizons||{ goals:[], vision:[], purpose:[] }, game: blob.game||game };
+      areas: blob.areas||[], horizons: blob.horizons||{ goals:[], vision:[], purpose:[] }, game: blob.game||game,
+      plants: blob.plants||plants };
     const fromV = typeof blob.version === "number" ? blob.version : 0;
     if (fromV < APP_VERSION) b = runMigrations(b, fromV).data;
     isApplying.current = true;
     saveItems(b.items); saveProjects(b.projects); saveHabits(b.habits);
     saveLog(b.log); saveSettings(b.settings); saveAreas(b.areas);
-    saveHorizons(b.horizons); saveGame(b.game);
+    saveHorizons(b.horizons); saveGame(b.game); savePlants(b.plants);
     // Each save* call above updates stateRef so snapshot() is immediately current.
     if (blob.meta) {
       saveMeta({ ...blob.meta, version: Math.max(APP_VERSION, blob.meta.version || 0) });
@@ -1253,7 +1225,7 @@ export default function App() {
       pushTimer.current = setTimeout(() => { pushCloud(session); }, 300);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, projects, habits, log, settings, areas, horizons, game]);
+  }, [items, projects, habits, log, settings, areas, horizons, game, plants]);
 
 
   // ---- persisted setters — each also updates stateRef so snapshot() is never stale ----
@@ -1265,6 +1237,7 @@ export default function App() {
   const saveAreas    = (v) => { setAreas(v);    store.save(KEYS.areas, v);    stateRef.current = { ...stateRef.current, areas: v }; };
   const saveHorizons = (v) => { setHorizons(v); store.save(KEYS.horizons, v); stateRef.current = { ...stateRef.current, horizons: v }; };
   const saveGame     = (v) => { setGame(v);     store.save(KEYS.game, v);     stateRef.current = { ...stateRef.current, game: v }; };
+  const savePlants   = (v) => { setPlants(v);   store.save(KEYS.plants, v);   stateRef.current = { ...stateRef.current, plants: v }; };
   const saveMeta     = (v) => { setMeta(v);     store.save(KEYS.meta, v);     stateRef.current = { ...stateRef.current, meta: v }; };
 
   // ---- onboarding completion: persist name + seed GVP into horizons ----
@@ -1289,19 +1262,13 @@ export default function App() {
     setToasts((t) => [...t, { id, msg }]);
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2600);
   };
-  // award (or reclaim, with negative xp/gtd) — XP/₲ are clamped at 0 so a claw-back
-  // can never drive a balance negative. XP is permanent and accrues even in siege;
-  // the ₲ economy is frozen in siege (positive grants only).
-  const award = (xp, gtd, msg, opts = {}) => {
-    // Read current game from stateRef (always current) rather than closed-over state
+  // award (or reclaim, with negative xp/gtd) — XP/Seeds clamped at 0.
+  const award = (xp, gtd, msg) => {
     const g = stateRef.current.game;
-    const siegeFrozen = g.inSiege && !opts.duringSiege;
     const ng = { ...g, lastTended: Date.now() };
     const beforeLvl = levelFromXP(g.xp);
     ng.xp = Math.max(0, g.xp + (xp || 0));
-    if (!siegeFrozen || (gtd || 0) < 0) ng.gtd = Math.max(0, g.gtd + (gtd || 0));
-    // Update both React state AND stateRef synchronously so snapshot() captures
-    // the new XP/₲ immediately — without this, pushCloud would push stale game state.
+    ng.gtd = Math.max(0, g.gtd + (gtd || 0));
     setGame(ng);
     store.save(KEYS.game, ng);
     stateRef.current = { ...stateRef.current, game: ng };
@@ -1309,10 +1276,10 @@ export default function App() {
     if (msg) {
       const bits = [];
       if (xp) bits.push(`${xp > 0 ? "+" : ""}${xp} XP`);
-      if (gtd && (!siegeFrozen || gtd < 0)) bits.push(`${gtd > 0 ? "+" : ""}${gtd} ₲`);
+      if (gtd) bits.push(`${gtd > 0 ? "+" : ""}${gtd} ❀`);
       pushToast(`${msg}${bits.length ? "  " + bits.join("  ") : ""}`);
     }
-    if (afterLvl > beforeLvl) setTimeout(() => pushToast(`◆ Rank up — Level ${afterLvl}, ${rankFor(afterLvl)}`), 700);
+    if (afterLvl > beforeLvl) setTimeout(() => pushToast(`◆ Level up — Level ${afterLvl}, ${rankFor(afterLvl)}`), 700);
   };
 
   // ---- item ops ----
@@ -1333,7 +1300,6 @@ export default function App() {
     if (completing) {
       // compute and RECORD exactly what we grant, so a future restore reclaims the same amount
       const w = actionWeight(it, items);
-      const tier = toneTier(w);
       const ax = actionXP(w), ag = actionGTD(w);
 
       // project-claim detection on the post-completion list
@@ -1356,7 +1322,7 @@ export default function App() {
       }
       saveItems(next);
 
-      award(ax, ag, `${TONE_META[tier].label} down`);
+      award(ax, ag, "✓ Done");
       if (claim) {
         const proj = projects.find((p) => p.id === claim.proj);
         setTimeout(() => award(claim.xp, claim.gtd, `Structure claimed: ${proj ? proj.title : "building"}`), 500);
@@ -1382,15 +1348,15 @@ export default function App() {
       setExpanded((e) => ({ ...e, [pid]: true }));
       setClarifyId(null);
       setView("projects");
-      award(10, 0, "Threat identified → new structure");
-      if (remainingInbox === 0) setTimeout(() => award(50, 20, "◆ Perimeter secure — the fog clears"), 500);
+      award(10, 0, "Clarified → new project");
+      if (remainingInbox === 0) setTimeout(() => award(50, 20, "◆ Inbox clear"), 500);
       return;
     }
     const { _makeProject, ...clean } = next;
     updateItem(next.id, clean);
     setClarifyId(null);
-    award(10, 0, "Threat identified");
-    if (remainingInbox === 0) setTimeout(() => award(50, 20, "◆ Perimeter secure — the fog clears"), 500);
+    award(10, 0, "Clarified");
+    if (remainingInbox === 0) setTimeout(() => award(50, 20, "◆ Inbox clear"), 500);
   };
 
   // ---- project ops ----
@@ -1463,7 +1429,7 @@ export default function App() {
         nl[k] = { at: Date.now(), xp, gtd };
         saveLog(nl);
         award(5, 3, "Routine held");
-        if (milestone) setTimeout(() => award(milestone, milestone, `◆ ${milestone}-day streak — the settlement endures`), 500);
+        if (milestone) setTimeout(() => award(milestone, milestone, `◆ ${milestone}-day streak`), 500);
       } else {
         nl[k] = { at: Date.now(), xp: 0, gtd: 0 };
         saveLog(nl);
@@ -1471,9 +1437,7 @@ export default function App() {
     }
   };
 
-  // ---- weekly review payday (the boss) + siege break ----
-  // Fortification can be raised only on the weekend (Fri/Sat/Sun) and only ONCE per
-  // weekend window — completing it Friday locks it through Sunday.
+  // ---- weekly review (available Fri–Sun, once per weekend) ----
   const reviewAllowed = () => {
     const now = new Date();
     const dow = now.getDay(); // 0 Sun .. 6 Sat
@@ -1489,28 +1453,66 @@ export default function App() {
   const completeReview = () => {
     const gate = reviewAllowed();
     if (!gate.ok) {
-      pushToast(gate.doneThisWeekend ? "Already fortified this weekend. The walls hold." : "The fortification can only be raised on the weekend.");
+      pushToast(gate.doneThisWeekend ? "Already tended this weekend. Come back next Friday." : "Weekly tending is on the weekend (Fri–Sun).");
       return;
     }
     const today = todayStr();
     saveSettings({ ...settings, lastReview: today });
     const g = stateRef.current.game;
-    const wasSiege = g.inSiege;
-    const ng = { ...g, lastTended: Date.now(), siegeBrokenAt: Date.now(), inSiege: false };
+    const ng = { ...g, lastTended: Date.now() };
     ng.xp = g.xp + 200;
     ng.gtd = g.gtd + 100;
     saveGame(ng);
-    pushToast("◆◆ SETTLEMENT FORTIFIED  +200 XP  +100 ₲");
-    if (wasSiege) setTimeout(() => pushToast("The siege is broken. Dawn comes."), 800);
+    pushToast("◆◆ GREENHOUSE TENDED  +200 XP  +100 ❀");
     const after = levelFromXP(ng.xp), before = levelFromXP(g.xp);
-    if (after > before) setTimeout(() => pushToast(`◆ Rank up — Level ${after}, ${rankFor(after)}`), 1100);
+    if (after > before) setTimeout(() => pushToast(`◆ Level up — Level ${after}, ${rankFor(after)}`), 800);
+  };
+
+  // ---- plant ops ----
+  const addPlantXp = (minutes) => {
+    if (!minutes || minutes <= 0) return;
+    const p = stateRef.current.plants;
+    if (!p || !p.active) return;
+    const plantIdx = (p.owned || []).findIndex((x) => x.id === p.active);
+    if (plantIdx === -1) return;
+    const plant = { ...p.owned[plantIdx] };
+    if (plant.maxed) return;
+    plant.xp = (plant.xp || 0) + minutes;
+    const speciesData = PLANT_CATALOG[plant.species];
+    if (!speciesData) { savePlants({ ...p, owned: p.owned.map((x, i) => i === plantIdx ? plant : x) }); return; }
+    let evolved = false;
+    while (plant.stage < speciesData.stages.length - 1) {
+      const stageData = speciesData.stages[plant.stage];
+      if (stageData.xpToNext !== null && plant.xp >= stageData.xpToNext) { plant.stage += 1; evolved = true; }
+      else break;
+    }
+    if (plant.stage >= speciesData.stages.length - 1) plant.maxed = true;
+    savePlants({ ...p, owned: p.owned.map((x, i) => i === plantIdx ? plant : x) });
+    if (evolved) setTimeout(() => setEvolutionData({ plant, speciesData }), 200);
+  };
+  const buyPlant = (speciesKey) => {
+    const spec = PLANT_CATALOG[speciesKey];
+    if (!spec) return;
+    const g = stateRef.current.game;
+    if (g.gtd < spec.cost) return;
+    const p = stateRef.current.plants;
+    const alreadyOwns = (p.owned || []).some((x) => x.species === speciesKey);
+    if (alreadyOwns) return;
+    const newPlant = { id: "plant-" + uid(), species: speciesKey, xp: 0, stage: 0, maxed: false, plantedAt: Date.now(), nickname: null };
+    saveGame({ ...g, gtd: g.gtd - spec.cost });
+    savePlants({ ...p, owned: [...(p.owned || []), newPlant], active: newPlant.id });
+    pushToast(`${spec.emoji} ${spec.name} planted in your greenhouse`);
+  };
+  const setActivePlant = (id) => {
+    const p = stateRef.current.plants;
+    savePlants({ ...p, active: id });
   };
 
   // ---- cosmetics (avatars + themes) ----
   const ownsCosmetic = (id) => (stateRef.current.game.ownedCosmetics || []).includes(id);
   const buyCosmetic = (item) => {
     const g = stateRef.current.game;
-    if (ownsCosmetic(item.id) || g.gtd < item.cost || g.inSiege) return;
+    if (ownsCosmetic(item.id) || g.gtd < item.cost) return;
     saveGame({ ...g, gtd: g.gtd - item.cost, ownedCosmetics: [...(g.ownedCosmetics || []), item.id] });
     pushToast(`Acquired: ${item.name}`);
   };
@@ -1522,7 +1524,7 @@ export default function App() {
 
   // ---- export / import ----
   const exportData = () => JSON.stringify({
-    version: APP_VERSION, exportedAt: new Date().toISOString(), items, projects, habits, log, settings, areas, horizons, game, meta,
+    version: APP_VERSION, exportedAt: new Date().toISOString(), items, projects, habits, log, settings, areas, horizons, game, plants, meta,
   }, null, 2);
   const importData = (text) => {
     try {
@@ -1533,12 +1535,13 @@ export default function App() {
         log: d.log || {}, settings: d.settings || { contexts: DEFAULT_CONTEXTS, lastReview: null },
         areas: d.areas || [], horizons: d.horizons || { goals: [], vision: [], purpose: [] },
         game: d.game || game,
+        plants: d.plants || plants,
       };
       const fromV = typeof d.version === "number" ? d.version : 0;
       if (fromV < APP_VERSION) bundle = runMigrations(bundle, fromV).data;
       saveItems(bundle.items); saveProjects(bundle.projects); saveHabits(bundle.habits);
       saveLog(bundle.log); saveSettings(bundle.settings); saveAreas(bundle.areas);
-      saveHorizons(bundle.horizons); saveGame(bundle.game);
+      saveHorizons(bundle.horizons); saveGame(bundle.game); savePlants(bundle.plants);
       const importedMeta = d.meta && typeof d.meta === "object" ? d.meta : meta;
       saveMeta({ ...importedMeta, version: APP_VERSION });
       setExportOpen(false);
@@ -1580,27 +1583,9 @@ export default function App() {
   const editItem = items.find((i) => i.id === editId);
   const projName = (id) => projects.find((p) => p.id === id)?.title;
 
-  // ---- live threat (computed, never stored as a free number) ----
-  const threat = useMemo(() => threatBreakdown({
-    items, projects, habits, log, lastReview: settings.lastReview, lastTended: game.lastTended, siegeBrokenAt: game.siegeBrokenAt, journeyStarted: meta.journeyStarted,
-  }), [items, projects, habits, log, settings.lastReview, game.lastTended, game.siegeBrokenAt, meta.journeyStarted]);
-  const band = threatBand(threat.value);
-
-  // siege latch: enter at 100, exit handled by review or dropping below 70
-  useEffect(() => {
-    if (!loaded) return;
-    if (threat.value >= 100 && !game.inSiege) {
-      saveGame({ ...game, inSiege: true });
-      pushToast("⚠ THE WALL IS BREACHED — UNDER SIEGE");
-    } else if (game.inSiege && threat.value < 70) {
-      saveGame({ ...game, inSiege: false, siegeBrokenAt: Date.now() });
-      pushToast("You've pushed them back. The siege lifts.");
-    }
-  }, [threat.value, loaded]);
-
   const lvl = levelProgress(game.xp);
   const rank = rankFor(lvl.level);
-  const goWatch = () => setView("watchtower");
+  const goGreenhouse = () => setView("greenhouse");
 
   if (!loaded) {
     return (
@@ -1612,10 +1597,8 @@ export default function App() {
   }
 
   const NAV = [
-    { id: "watchtower", label: "The Watchtower", icon: Radar },
-    { id: "today", label: "Today", icon: Sun },
-    { id: "inbox", label: "Inbox", icon: Inbox, count: inbox.length, hot: inbox.length > 0 },
-    { id: "next", label: "Next Actions", icon: Zap, count: nexts.length },
+    { id: "greenhouse", label: "The Greenhouse", icon: Leaf },
+    { id: "today", label: "Today", icon: Sun, count: inbox.length + filteredNexts.length, hot: inbox.length > 0 },
     { id: "projects", label: "Projects", icon: FolderKanban, count: activeProjects.length, warn: stalled.length },
     { id: "waiting", label: "Waiting For", icon: Hourglass, count: waiting.length },
     { id: "calendar", label: "Scheduled", icon: Calendar, count: scheduled.length },
@@ -1642,11 +1625,11 @@ export default function App() {
           </div>
           <div>
             <div className="serif" style={{ fontSize: 26, lineHeight: 1 }}>Clearmind</div>
-            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1 }}>GTD · SURVIVAL</div>
+            <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1 }}>GTD · GREENHOUSE</div>
           </div>
         </div>
         <p style={{ fontSize: 14, color: "var(--ink2)", textAlign: "center", maxWidth: 280, margin: 0, lineHeight: 1.5 }}>
-          Sign in to sync your settlement across every device.
+          Sign in to sync your greenhouse across every device.
         </p>
         {syncBusy
           ? <div className="mono" style={{ fontSize: 12, color: "var(--muted)" }}>Signing in…</div>
@@ -1656,8 +1639,8 @@ export default function App() {
       </div>
     )}
     {(!syncEnabled || session) && (
-    <div className={"gtd app-shell" + (game.inSiege ? " siege" : "") + (drawerOpen ? " drawer-open" : "") + (sidebarCollapsed ? " sidebar-collapsed" : "")}
-      style={!game.inSiege && themeById(game.equipped?.theme).vars ? themeById(game.equipped.theme).vars : undefined}>
+    <div className={"gtd app-shell" + (drawerOpen ? " drawer-open" : "") + (sidebarCollapsed ? " sidebar-collapsed" : "")}
+      style={themeById(game.equipped?.theme).vars || undefined}>
       <style>{STYLE}</style>
 
       {/* Mobile backdrop — tap to close the drawer */}
@@ -1672,7 +1655,7 @@ export default function App() {
           </div>
           <div>
             <div className="serif" style={{ fontSize: 17, lineHeight: 1, fontWeight: 600 }}>Clearmind</div>
-            <div className="mono" style={{ fontSize: 9.5, color: "var(--muted)", letterSpacing: 1 }}>GTD · HABITS</div>
+            <div className="mono" style={{ fontSize: 9.5, color: "var(--muted)", letterSpacing: 1 }}>GTD · GREENHOUSE</div>
           </div>
         </div>
         <nav style={{ display: "flex", flexDirection: "column", gap: 2 }}>
@@ -1714,7 +1697,7 @@ export default function App() {
           <span className="serif" style={{ fontSize: 17, fontWeight: 600 }}>Clearmind</span>
         </div>
 
-        {/* STATUS STRIP — glanceable, doorway to the Watchtower */}
+        {/* STATUS STRIP — glanceable, doorway to the Greenhouse */}
         {/* Sidebar toggle sits here on desktop so it's always accessible */}
         <div style={{ display: "flex", alignItems: "stretch" }}>
           <button className="sidebar-toggle" title={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
@@ -1722,7 +1705,7 @@ export default function App() {
             <Menu size={15} />
           </button>
           <div style={{ flex: 1 }}>
-            <StatusStrip threat={threat} band={band} lvl={lvl} rank={rank} gtd={game.gtd} siege={game.inSiege} onClick={goWatch} />
+            <StatusStrip lvl={lvl} rank={rank} gtd={game.gtd} plants={plants} onClick={goGreenhouse} />
           </div>
         </div>
 
@@ -1737,17 +1720,15 @@ export default function App() {
         </div>
 
         <div className="content-scroll" style={{ flex: 1, overflow: "auto", padding: "22px" }}>
-          {view === "watchtower" && <Watchtower {...{ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit: setEditId, buyCosmetic, equipCosmetic }} />}
-          {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items, name: meta.name }} />}
-          {view === "inbox" && <InboxView {...{ inbox, setClarifyId }} />}
-          {view === "next" && <NextView {...{ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, projName, count: filteredNexts.length, blockedCount, onEdit: setEditId, onManageCtx: () => setCtxMgrOpen(true), items }} />}
-          {view === "projects" && <ProjectsView {...{ activeProjects, allItems: items, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit: setEditId, areas, assignProjectArea }} />}
+          {view === "greenhouse" && <Greenhouse {...{ lvl, rank, game, buyCosmetic, equipCosmetic, plants, buyPlant, setActivePlant }} />}
+          {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items, name: meta.name, onStart: setFocusItemId, contexts, ctxFilter, setCtxFilter, blockedCount, onManageCtx: () => setCtxMgrOpen(true), setClarifyId }} />}
+          {view === "projects" && <ProjectsView {...{ activeProjects, allItems: items, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit: setEditId, areas, assignProjectArea, onStart: setFocusItemId }} />}
           {view === "waiting" && <WaitingView {...{ waiting, toggleDone, updateItem, deleteItem, onEdit: setEditId }} />}
           {view === "calendar" && <CalendarView {...{ scheduled, toggleDone, deleteItem, onEdit: setEditId }} />}
           {view === "someday" && <SomedayView {...{ somedays, updateItem, deleteItem, onEdit: setEditId }} />}
           {view === "reference" && <ReferenceView {...{ refs, deleteItem, updateItem, onEdit: setEditId }} />}
           {view === "habits" && <HabitsView {...{ habits, log, toggleLog, addHabit, deleteHabit, updateHabit, purposes: horizons.purpose || [], setView }} />}
-          {view === "review" && <ReviewView {...{ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, siege: game.inSiege, gate: reviewAllowed() }} />}
+          {view === "review" && <ReviewView {...{ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, gate: reviewAllowed() }} />}
           {view === "archive" && <ArchiveView {...{ completedItems, completedProjects, projName, restoreItem, deleteItem, reactivateProject, deleteProject }} />}
           {view === "areas" && <AreasView {...{ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit: setEditId, horizons, setView }} />}
           {view === "horizons" && <HorizonsView {...{ horizons, areas, addHorizon, updateHorizon, deleteHorizon, setView, setOpenArea }} />}
@@ -1779,6 +1760,14 @@ export default function App() {
         onSignOut={doSignOut} onManualSync={manualSync} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
       {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
+      {focusItemId && (
+        <FocusModal item={items.find((i) => i.id === focusItemId)} plants={plants}
+          onDone={(minutes) => { addPlantXp(minutes); toggleDone(focusItemId); setFocusItemId(null); }}
+          onCancel={(minutes) => { addPlantXp(minutes); setFocusItemId(null); }} />
+      )}
+      {evolutionData && (
+        <EvolutionModal data={evolutionData} onClose={() => setEvolutionData(null)} />
+      )}
     </div>
     )}
     </>
@@ -1797,18 +1786,14 @@ function SectionTitle({ children, sub }) {
   );
 }
 
-function ActionRow({ item, toggleDone, projName, showCtx, onEdit, items }) {
-  const w = items ? actionWeight(item, items) : null;
-  const tier = w != null ? toneTier(w) : null;
-  const meta = tier ? TONE_META[tier] : null;
+function ActionRow({ item, toggleDone, projName, showCtx, onEdit, items, onStart }) {
   return (
     <div className="row act-row">
       <div className={"checkbox" + (item.done ? " done" : "")} onClick={() => toggleDone(item.id)}>
         {item.done && <Check size={13} color="#fbf9f4" />}
       </div>
       <div style={{ flex: 1, minWidth: 0, cursor: onEdit ? "pointer" : "default" }} onClick={() => onEdit && onEdit(item.id)}>
-        <div style={{ fontSize: 14, textDecoration: item.done ? "line-through" : "none", color: item.done ? "var(--muted)" : "var(--ink)", display: "flex", alignItems: "center", gap: 7 }}>
-          {meta && <span title={`${meta.label} — ${encounterLine(tier, item.title.length)}`} style={{ color: meta.color, fontWeight: 700, flexShrink: 0 }}>{meta.sigil}</span>}
+        <div style={{ fontSize: 14, textDecoration: item.done ? "line-through" : "none", color: item.done ? "var(--muted)" : "var(--ink)" }}>
           {item.title}
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap", alignItems: "center" }}>
@@ -1817,46 +1802,110 @@ function ActionRow({ item, toggleDone, projName, showCtx, onEdit, items }) {
           {item.time && <span className="pill">{item.time}</span>}
           {item.recur && <span className="pill" style={{ color: "var(--clay)" }}><Repeat size={9} style={{ verticalAlign: -1 }} /> {item.recur}</span>}
           {item.dueDate && <span className="pill">{relDate(item.dueDate)}</span>}
-          {meta && <span className="mono" style={{ fontSize: 10, color: meta.color }}>{meta.label}</span>}
           {item.projectId && projName && projName(item.projectId) && (
             <span className="mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>↳ {projName(item.projectId)}</span>
           )}
         </div>
       </div>
+      {onStart && !item.done && item.type === "next" && (
+        <button className="btn btn-ghost btn-sm edit-btn" title="Focus session" onClick={(e) => { e.stopPropagation(); onStart(item.id); }}>
+          <Timer size={13} />
+        </button>
+      )}
       {onEdit && <button className="btn btn-ghost btn-sm edit-btn" onClick={() => onEdit(item.id)}><Pencil size={13} /></button>}
     </div>
   );
 }
 
-function TodayView({ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit, items, name }) {
+function TodayView({ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, onEdit, items, name, onStart, contexts, ctxFilter, setCtxFilter, blockedCount, onManageCtx, setClarifyId }) {
   const todayScheduled = scheduled.filter((i) => i.dueDate <= todayStr());
   const first = (name || "").trim().split(" ")[0];
+  const ctxKeys = Object.keys(nextsByCtx).sort();
+  const [collapsedCtxs, setCollapsedCtxs] = useState(() => new Set());
+  const [showFilter, setShowFilter] = useState(true);
+
+  const toggleCtx = (k) => setCollapsedCtxs((prev) => {
+    const next = new Set(prev);
+    next.has(k) ? next.delete(k) : next.add(k);
+    return next;
+  });
+
   return (
     <div className="stagger">
       <SectionTitle sub={new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}>
         {first ? `Good to see you, ${first}` : "Good to see you"}
       </SectionTitle>
 
-      {inbox.length > 0 && (
-        <div className="card" style={{ padding: 14, marginBottom: 16, borderColor: "var(--clay)", background: "var(--clay-soft)" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontSize: 13.5 }}>You have <b>{inbox.length}</b> unprocessed {inbox.length === 1 ? "item" : "items"} in your inbox.</span>
-            <button className="btn btn-clay btn-sm" onClick={() => setView("inbox")}>Clarify now <ArrowRight size={13} /></button>
+      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, alignItems: "start" }}>
+        {/* LEFT — Next Actions with context filter */}
+        <div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <span className="serif" style={{ fontSize: 16 }}>
+              <Zap size={14} style={{ verticalAlign: -2, color: "var(--pine)" }} /> Next Actions
+              <span className="mono" style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>{filteredNexts.length}</span>
+            </span>
+            <button className="btn btn-ghost btn-sm" title={showFilter ? "Hide filter" : "Show filter"} onClick={() => setShowFilter((v) => !v)}>
+              <Filter size={13} style={{ color: showFilter ? "var(--pine)" : "var(--muted)" }} />
+            </button>
           </div>
-        </div>
-      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16 }}>
-        <div className="card" style={{ padding: 0, overflow: "hidden" }}>
-          <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span className="serif" style={{ fontSize: 16 }}><Zap size={14} style={{ verticalAlign: -2, color: "var(--pine)" }} /> Next Actions</span>
-            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{filteredNexts.length}</span>
-          </div>
-          {filteredNexts.length === 0 ? <Empty icon={Zap} title="Nothing queued" sub="Process your inbox to surface actions." />
-            : filteredNexts.slice(0, 8).map((i) => <ActionRow key={i.id} item={i} toggleDone={toggleDone} projName={projName} showCtx onEdit={onEdit} items={items} />)}
+          {showFilter && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+              <Pill on={ctxFilter === "all"} onClick={() => setCtxFilter("all")}>all</Pill>
+              {contexts.map((c) => <Pill key={c} on={ctxFilter === c} onClick={() => setCtxFilter(c)}>{c}</Pill>)}
+              <button className="btn btn-ghost btn-sm" style={{ marginLeft: "auto" }} onClick={onManageCtx}><Settings2 size={13} /> Contexts</button>
+            </div>
+          )}
+
+          {blockedCount > 0 && (
+            <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, display: "flex", alignItems: "center", gap: 5 }}>
+              <Lock size={11} /> {blockedCount} action{blockedCount > 1 ? "s" : ""} hidden — waiting on a precursor
+            </div>
+          )}
+
+          {filteredNexts.length === 0
+            ? <Empty icon={Zap} title="Nothing queued" sub="Process your inbox to surface actions." />
+            : ctxKeys.map((k) => {
+              const collapsed = collapsedCtxs.has(k);
+              return (
+                <div key={k} style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, cursor: "pointer", userSelect: "none" }} onClick={() => toggleCtx(k)}>
+                    <span className="mono pill pill-ctx" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      {k}
+                      <span style={{ fontSize: 10, color: "var(--muted)" }}>{nextsByCtx[k].length}</span>
+                    </span>
+                    {collapsed ? <ChevronRight size={13} color="var(--muted)" /> : <ChevronDown size={13} color="var(--muted)" />}
+                  </div>
+                  {!collapsed && (
+                    <div className="card" style={{ overflow: "hidden" }}>
+                      {nextsByCtx[k].map((i) => <ActionRow key={i.id} item={i} toggleDone={toggleDone} projName={projName} onEdit={onEdit} items={items} onStart={onStart} />)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
         </div>
 
+        {/* RIGHT — Inbox + Habits + Due/Scheduled + Stalled */}
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {inbox.length > 0 && (
+            <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+              <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span className="serif" style={{ fontSize: 16 }}><Inbox size={14} style={{ verticalAlign: -2, color: "var(--clay)" }} /> Inbox</span>
+                <span className="mono" style={{ fontSize: 11, color: "var(--clay)" }}>{inbox.length}</span>
+              </div>
+              {inbox.map((i) => (
+                <div key={i.id} className="row" style={{ alignItems: "center", cursor: "pointer" }} onClick={() => setClarifyId(i.id)}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13.5 }}>{i.title}</div>
+                    <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>{relDate(isoDate(new Date(i.createdAt)))}</div>
+                  </div>
+                  <button className="btn btn-accent btn-sm" onClick={(e) => { e.stopPropagation(); setClarifyId(i.id); }}>Clarify <ArrowRight size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <div className="card" style={{ padding: 0, overflow: "hidden" }}>
             <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}>
               <span className="serif" style={{ fontSize: 16 }}><Repeat size={14} style={{ verticalAlign: -2, color: "var(--clay)" }} /> Today's Habits</span>
@@ -1874,7 +1923,7 @@ function TodayView({ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, l
               })}
           </div>
 
-          {(todayScheduled.length > 0) && (
+          {todayScheduled.length > 0 && (
             <div className="card" style={{ padding: 0, overflow: "hidden" }}>
               <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--line)" }}>
                 <span className="serif" style={{ fontSize: 16 }}><Calendar size={14} style={{ verticalAlign: -2, color: "var(--pine)" }} /> Due / Scheduled</span>
@@ -1922,7 +1971,7 @@ function InboxView({ inbox, setClarifyId }) {
   );
 }
 
-function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, projName, count, blockedCount, onEdit, onManageCtx, items }) {
+function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, projName, count, blockedCount, onEdit, onManageCtx, items, onStart }) {
   const keys = Object.keys(nextsByCtx).sort();
   return (
     <div className="stagger">
@@ -1943,7 +1992,7 @@ function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, p
           <div key={k} style={{ marginBottom: 16 }}>
             <div className="mono pill pill-ctx" style={{ display: "inline-block", marginBottom: 8 }}>{k}</div>
             <div className="card" style={{ overflow: "hidden" }}>
-              {nextsByCtx[k].map((i) => <ActionRow key={i.id} item={i} toggleDone={toggleDone} projName={projName} onEdit={onEdit} items={items} />)}
+              {nextsByCtx[k].map((i) => <ActionRow key={i.id} item={i} toggleDone={toggleDone} projName={projName} onEdit={onEdit} items={items} onStart={onStart} />)}
             </div>
           </div>
         ))}
@@ -1951,7 +2000,7 @@ function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, p
   );
 }
 
-function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit, areas, assignProjectArea }) {
+function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit, areas, assignProjectArea, onStart }) {
   const [np, setNp] = useState("");
   const [menuFor, setMenuFor] = useState(null); // project id whose settings menu is open
   const [menuPos, setMenuPos] = useState(null); // {top,right} anchor for the fixed popover
@@ -1961,7 +2010,7 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
   return (
     <>
     <div className="stagger">
-      <SectionTitle sub="Any outcome needing more than one step. Chain tasks with precursors so only what's truly doable surfaces as a next action.">Projects <span className="subq">INFESTED STRUCTURES</span></SectionTitle>
+      <SectionTitle sub="Any outcome needing more than one step. Chain tasks with precursors so only what's truly doable surfaces as a next action.">Projects</SectionTitle>
       <div style={{ display: "flex", gap: 9, marginBottom: 18 }}>
         <input className="input" placeholder="New project — desired outcome…" value={np}
           onChange={(e) => setNp(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { addProject(np); setNp(""); } }} />
@@ -2001,7 +2050,7 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
                 </div>
               </div>
               {open && <ProjectBody p={p} acts={acts} addActionToProject={addActionToProject} toggleDone={toggleDone}
-                updateItem={updateItem} isBlocked={isBlocked} allItems={allItems} contexts={contexts} onEdit={onEdit} />}
+                updateItem={updateItem} isBlocked={isBlocked} allItems={allItems} contexts={contexts} onEdit={onEdit} onStart={onStart} />}
             </div>
           );
         })}
@@ -2046,7 +2095,7 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
   );
 }
 
-function ProjectBody({ p, acts, addActionToProject, toggleDone, updateItem, isBlocked, allItems, contexts, onEdit }) {
+function ProjectBody({ p, acts, addActionToProject, toggleDone, updateItem, isBlocked, allItems, contexts, onEdit, onStart }) {
   const [t, setT] = useState("");
   const [c, setC] = useState(contexts[0]);
   const [depFor, setDepFor] = useState(null); // task id whose precursor picker is open
@@ -2086,6 +2135,7 @@ function ProjectBody({ p, acts, addActionToProject, toggleDone, updateItem, isBl
                   ))}
                 </div>
               </div>
+              {onStart && !i.done && <button className="btn btn-ghost btn-sm edit-btn" title="Focus session" onClick={() => onStart(i.id)}><Timer size={13} /></button>}
               <button className="btn btn-ghost btn-sm" title="Add precursor" onClick={() => setDepFor(depFor === i.id ? null : i.id)}><Link2 size={13} /></button>
               <button className="btn btn-ghost btn-sm edit-btn" onClick={() => onEdit(i.id)}><Pencil size={13} /></button>
             </div>
@@ -2358,7 +2408,7 @@ function HabitsView({ habits, log, toggleLog, addHabit, deleteHabit, updateHabit
   );
 }
 
-function ReviewView({ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, siege, gate }) {
+function ReviewView({ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, gate }) {
   const [checks, setChecks] = useState({});
   const steps = [
     { g: "Get Clear", items: [
@@ -2384,25 +2434,19 @@ function ReviewView({ inbox, nexts, waiting, stalled, somedays, setView, setting
   let idx = -1;
   return (
     <div className="stagger">
-      <SectionTitle sub={settings.lastReview ? `Last fortified: ${settings.lastReview}${daysSinceReview != null ? ` (${daysSinceReview}d ago)` : ""}` : "The settlement has never been fortified."}>
-        Weekly Review <span className="subq">FORTIFY · THE BOSS</span>
+      <SectionTitle sub={settings.lastReview ? `Last tended: ${settings.lastReview}${daysSinceReview != null ? ` (${daysSinceReview}d ago)` : ""}` : "The greenhouse has never had a weekly tending."}>
+        Weekly Review <span className="subq">TEND · THE GREENHOUSE</span>
       </SectionTitle>
-      {siege && (
-        <div className="card" style={{ padding: 13, marginBottom: 14, borderColor: "var(--t-siege)", background: "var(--clay-soft)", display: "flex", gap: 9, alignItems: "center" }}>
-          <Shield size={17} color="var(--t-siege)" />
-          <span style={{ fontSize: 13 }}>The settlement is <b>under siege</b>. Completing this fortification is the surest way to break it.</span>
-        </div>
-      )}
       {!gate.isWeekend && (
         <div className="card" style={{ padding: 13, marginBottom: 14, display: "flex", gap: 9, alignItems: "center" }}>
           <Calendar size={16} color="var(--muted)" />
-          <span style={{ fontSize: 13, color: "var(--ink2)" }}>Fortification crews only muster on the <b>weekend</b> (Fri–Sun). You can still walk the checklist now, but the settlement can't be fortified until then.</span>
+          <span style={{ fontSize: 13, color: "var(--ink2)" }}>Weekly tending happens on the <b>weekend</b> (Fri–Sun). Walk the checklist any time, but the reward is only available then.</span>
         </div>
       )}
       {gate.isWeekend && gate.doneThisWeekend && (
         <div className="card" style={{ padding: 13, marginBottom: 14, display: "flex", gap: 9, alignItems: "center" }}>
           <Check size={16} color="var(--pine)" />
-          <span style={{ fontSize: 13, color: "var(--ink2)" }}>Already fortified this weekend. The walls hold — come back next weekend.</span>
+          <span style={{ fontSize: 13, color: "var(--ink2)" }}>Already tended this weekend. Come back next Friday.</span>
         </div>
       )}
       <div className="card" style={{ padding: 16 }}>
@@ -2426,11 +2470,11 @@ function ReviewView({ inbox, nexts, waiting, stalled, somedays, setView, setting
         ))}
         <button className="btn btn-accent" style={{ width: "100%", justifyContent: "center" }} disabled={done < all.length || !gate.ok}
           onClick={complete}>
-          <Shield size={16} /> {
+          <Leaf size={16} /> {
             !gate.isWeekend ? "Available on the weekend"
-            : gate.doneThisWeekend ? "Fortified — back next weekend"
-            : done < all.length ? `${done}/${all.length} — hold the line`
-            : "Fortify the settlement  ·  +200 XP +100 ₲"
+            : gate.doneThisWeekend ? "Tended — come back next Friday"
+            : done < all.length ? `${done}/${all.length} — keep going`
+            : "Tend the greenhouse  ·  +200 XP +100 ❀"
           }
         </button>
       </div>
@@ -2709,17 +2753,27 @@ function AvatarPixels({ avatar, size = 56 }) {
 const themeById = (id) => THEMES.find((t) => t.id === id) || THEMES[0];
 const avatarById = (id) => AVATARS.find((a) => a.id === id) || AVATARS[0];
 
-function Glyph() { return <span className="gtd-glyph" style={{ padding: "0 3px" }}>G</span>; }
+function Glyph() { return <span style={{ color: "var(--pine)", fontWeight: 700 }}>❀</span>; }
 
-function StatusStrip({ threat, band, lvl, rank, gtd, siege, onClick }) {
-  const c = `var(${band.varc})`;
+function StatusStrip({ lvl, rank, gtd, plants, onClick }) {
+  const activePlant = plants && plants.active ? (plants.owned || []).find((p) => p.id === plants.active) : null;
+  const speciesData = activePlant ? PLANT_CATALOG[activePlant.species] : null;
+  const stageData = speciesData && activePlant ? speciesData.stages[activePlant.stage] : null;
   return (
-    <div className="strip" onClick={onClick} title="Open the Watchtower" style={siege ? { background: "var(--clay-soft)" } : null}>
-      <div className="seg" style={{ minWidth: 150 }}>
-        {siege ? <Skull size={14} color={c} style={{ animation: "pulse 1s infinite" }} /> : <Shield size={14} color={c} />}
-        <span style={{ color: c, fontWeight: 600 }}>{band.name}</span>
-        <div className="threat-bar" style={{ width: 64 }}><i style={{ width: `${threat.value}%`, background: c }} /></div>
-        <span style={{ color: c }}>{threat.value}</span>
+    <div className="strip" onClick={onClick} title="Open the Greenhouse">
+      <div className="seg" style={{ gap: 8 }}>
+        <Leaf size={14} color="var(--pine)" />
+        {activePlant && speciesData ? (
+          <>
+            <span style={{ color: "var(--pine)", fontWeight: 600 }}>{speciesData.emoji} {speciesData.name}</span>
+            <span style={{ color: "var(--muted)", fontSize: 11 }}>{stageData ? stageData.name : ""}</span>
+            {stageData && stageData.xpToNext && (
+              <div className="xp-bar" style={{ width: 48 }}>
+                <i style={{ width: `${Math.min(100, Math.round(((activePlant.xp || 0) / stageData.xpToNext) * 100))}%` }} />
+              </div>
+            )}
+          </>
+        ) : <span style={{ color: "var(--muted)", fontSize: 12 }}>No active plant</span>}
       </div>
       <div className="seg">
         <span style={{ color: "var(--amber)", fontWeight: 600 }}>LV {lvl.level}</span>
@@ -2729,91 +2783,69 @@ function StatusStrip({ threat, band, lvl, rank, gtd, siege, onClick }) {
       <div className="seg" style={{ marginLeft: "auto" }}>
         <Glyph /><span style={{ fontWeight: 600 }}>{gtd}</span>
       </div>
-      <Radar size={13} color="var(--muted)" />
+      <Leaf size={13} color="var(--muted)" />
     </div>
   );
 }
 
-function MeterRing({ value, color, siege }) {
-  const r = 52, c = 2 * Math.PI * r, off = c - (value / 100) * c;
+function PlantSprite({ species, stage, size = 64 }) {
+  const speciesData = PLANT_CATALOG[species];
+  if (!speciesData) return null;
+  const stageData = speciesData.stages[stage] || speciesData.stages[0];
+  if (stageData.src) {
+    return <img src={stageData.src} alt={stageData.name} width={size} height={size} style={{ imageRendering: "pixelated", display: "block" }} />;
+  }
   return (
-    <svg width="130" height="130" viewBox="0 0 130 130">
-      <circle cx="65" cy="65" r={r} fill="none" stroke="var(--paper2)" strokeWidth="11" />
-      <circle cx="65" cy="65" r={r} fill="none" stroke={color} strokeWidth="11" strokeLinecap="round"
-        strokeDasharray={c} strokeDashoffset={off} transform="rotate(-90 65 65)" style={{ transition: "stroke-dashoffset .6s ease, stroke .3s" }} />
-      <text x="65" y="60" textAnchor="middle" fontFamily="IBM Plex Mono" fontSize="30" fontWeight="600" fill={color}>{value}</text>
-      <text x="65" y="80" textAnchor="middle" fontFamily="IBM Plex Mono" fontSize="9.5" fill="var(--muted)" letterSpacing="1">THREAT</text>
-      {siege && <text x="65" y="98" textAnchor="middle" fontFamily="IBM Plex Mono" fontSize="8" fill={color}>SIEGE</text>}
-    </svg>
+    <div style={{ width: size, height: size, borderRadius: 10, background: stageData.tile, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2 }}>
+      <span style={{ fontSize: size * 0.38 }}>{speciesData.emoji}</span>
+      <span style={{ fontSize: size * 0.13, color: "rgba(255,255,255,.8)", fontFamily: "IBM Plex Mono" }}>{stageData.name}</span>
+    </div>
   );
 }
 
-function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, stalled, daysSinceReview, settings, setView, setClarifyId, onEdit, buyCosmetic, equipCosmetic }) {
-  const c = `var(${band.varc})`;
-  // high-value raids: biggest brute, project nearest a claim, overdue fortify
-  const raids = [];
-  const sortedNext = [...nexts].map((i) => ({ i, w: actionWeight(i, items) })).sort((a, b) => b.w - a.w);
-  if (sortedNext[0]) {
-    const { i, w } = sortedNext[0];
-    raids.push({ icon: Crosshair, color: TONE_META[toneTier(w)].color, title: i.title, sub: `${TONE_META[toneTier(w)].label} · worth ${actionXP(w)} XP`, go: () => onEdit(i.id) });
-  }
-  const active = projects.filter((p) => p.status === "active");
-  const nearest = active.map((p) => ({ p, open: items.filter((i) => i.projectId === p.id && i.type === "next" && !i.done).length }))
-    .filter((x) => x.open > 0).sort((a, b) => a.open - b.open)[0];
-  if (nearest) raids.push({ icon: FolderKanban, color: "var(--pine)", title: nearest.p.title, sub: `${nearest.open} room${nearest.open > 1 ? "s" : ""} from claiming the structure`, go: () => setView("projects") });
-  const weekendNow = [5, 6, 0].includes(new Date().getDay());
-  if ((daysSinceReview === null || daysSinceReview >= 7)) {
-    raids.push(weekendNow
-      ? { icon: Shield, color: "var(--amber)", title: "Fortify the settlement", sub: "Weekly review — the biggest payday (+200 XP)", go: () => setView("review") }
-      : { icon: Shield, color: "var(--muted)", title: "Fortification due", sub: "Crews muster on the weekend (Fri–Sun)", go: () => setView("review") });
-  }
-  const firstInbox = items.find((i) => i.type === "inbox");
-  if (firstInbox) raids.push({ icon: Radar, color: c, title: "Identify the shapes in the fog", sub: `${items.filter((i) => i.type === "inbox").length} unprocessed · +10 XP each`, go: () => setView("inbox") });
-
-  const tier = rankTier(lvl.level);
+function Greenhouse({ lvl, rank, game, buyCosmetic, equipCosmetic, plants, buyPlant, setActivePlant }) {
   const avatar = avatarById(game.equipped?.avatar);
   const owned = (id) => (game.ownedCosmetics || []).includes(id);
+  const activePlant = plants.active ? (plants.owned || []).find((p) => p.id === plants.active) : null;
+  const activeSpecies = activePlant ? PLANT_CATALOG[activePlant.species] : null;
 
   return (
     <div className="stagger">
-      <SectionTitle sub="Your settlement at a glance — what's threatening it, what's worth raiding, and who you've become.">
-        The Watchtower
+      <SectionTitle sub="Your plants, your grower, your collection — a space to breathe and grow.">
+        The Greenhouse
       </SectionTitle>
 
-      {game.inSiege && (
-        <div className="card" style={{ padding: 14, marginBottom: 16, borderColor: "var(--t-siege)", background: "var(--clay-soft)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <Skull size={20} color="var(--t-siege)" style={{ animation: "pulse 1.1s infinite" }} />
-            <div style={{ flex: 1 }}>
-              <div className="serif" style={{ fontSize: 17 }}>The settlement is overrun</div>
-              <div style={{ fontSize: 12.5, color: "var(--ink2)" }}>The economy has collapsed — no trade until the line holds. Fortify, or push threat back below 70.</div>
-            </div>
-            <button className="btn btn-clay" onClick={() => setView("review")}><Shield size={15} /> Hold the line</button>
-          </div>
-        </div>
-      )}
-
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
-        {/* SETTLEMENT STATUS */}
-        <div className="card" style={{ padding: 16, display: "flex", gap: 16, alignItems: "center" }}>
-          <MeterRing value={threat.value} color={c} siege={game.inSiege} />
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
-              <span style={{ color: c, fontWeight: 600, fontFamily: "IBM Plex Mono", fontSize: 13 }}>{band.name}</span>
-              {threat.fortified && <span className="pill" style={{ color: "var(--pine-d)", background: "var(--pine-soft)", borderColor: "transparent" }}>fortified</span>}
-            </div>
-            <div className="subq" style={{ marginBottom: 6 }}>WHAT'S DRIVING IT</div>
-            {threat.parts.length === 0 ? <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Nothing. The walls are quiet.</div>
-              : threat.parts.map((p) => (
-                <div key={p.key} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "2px 0" }}>
-                  <span style={{ color: "var(--ink2)" }}>{p.label}</span>
-                  <span className="mono" style={{ color: c }}>+{Math.round(p.amt)}</span>
+        {/* ACTIVE PLANT CARD */}
+        <div className="card" style={{ padding: 16 }}>
+          <div className="subq" style={{ marginBottom: 10 }}>ACTIVE PLANT</div>
+          {activePlant && activeSpecies ? (
+            <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+              <PlantSprite species={activePlant.species} stage={activePlant.stage} size={72} />
+              <div style={{ flex: 1 }}>
+                <div className="serif" style={{ fontSize: 18 }}>{activePlant.nickname || activeSpecies.name}</div>
+                <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                  {activeSpecies.stages[activePlant.stage]?.name} · {activePlant.xp} XP
                 </div>
-              ))}
-          </div>
+                {!activePlant.maxed && activeSpecies.stages[activePlant.stage]?.xpToNext && (
+                  <div style={{ marginTop: 8 }}>
+                    <div className="xp-bar" style={{ height: 7 }}>
+                      <i style={{ width: `${Math.min(100, Math.round((activePlant.xp / activeSpecies.stages[activePlant.stage].xpToNext) * 100))}%` }} />
+                    </div>
+                    <div className="mono" style={{ fontSize: 10, color: "var(--muted)", marginTop: 3 }}>
+                      {activeSpecies.stages[activePlant.stage].xpToNext - activePlant.xp} XP to {activeSpecies.stages[activePlant.stage + 1]?.name}
+                    </div>
+                  </div>
+                )}
+                {activePlant.maxed && <div className="pill on" style={{ marginTop: 6, display: "inline-block" }}>Fully grown ✦</div>}
+              </div>
+            </div>
+          ) : (
+            <div style={{ fontSize: 13, color: "var(--muted)", textAlign: "center", padding: "16px 0" }}>No active plant — buy one in the Potting Shed below.</div>
+          )}
         </div>
 
-        {/* SURVIVOR CARD */}
+        {/* GROWER CARD */}
         <div className="card" style={{ padding: 16 }}>
           <div style={{ display: "flex", gap: 13, alignItems: "center", marginBottom: 14 }}>
             <div style={{ width: 56, height: 56, borderRadius: 12, background: "var(--paper2)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, overflow: "hidden" }}>
@@ -2825,43 +2857,71 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
             </div>
             <div style={{ textAlign: "right" }}>
               <div style={{ fontSize: 20, fontWeight: 600 }}><Glyph /> {game.gtd}</div>
-              <div className="subq">BALANCE</div>
+              <div className="subq">SEEDS</div>
             </div>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11 }} className="mono">
             <span style={{ color: "var(--muted)" }}>{game.xp} XP</span>
             <span style={{ color: "var(--muted)" }}>{lvl.ceil - game.xp} to Lv {lvl.level + 1}</span>
           </div>
-          <div className="xp-bar" style={{ margintop: 5, height: 7 }}><i style={{ width: `${lvl.pct}%` }} /></div>
+          <div className="xp-bar" style={{ marginTop: 5, height: 7 }}><i style={{ width: `${lvl.pct}%` }} /></div>
         </div>
       </div>
 
-      {/* HIGH-VALUE RAIDS */}
-      <div className="subq" style={{ marginBottom: 8 }}>HIGH-VALUE RAIDS</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 18 }}>
-        {raids.length === 0 ? <div style={{ fontSize: 13, color: "var(--muted)" }}>No pressing targets. Enjoy the quiet.</div>
-          : raids.map((r, i) => {
-            const I = r.icon;
-            return (
-              <div key={i} className="raid" onClick={r.go}>
-                <I size={17} color={r.color} style={{ flexShrink: 0 }} />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{r.sub}</div>
+      {/* COLLECTION */}
+      {(plants.owned || []).length > 1 && (
+        <>
+          <div className="subq" style={{ marginBottom: 8 }}>YOUR COLLECTION</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 18 }}>
+            {(plants.owned || []).map((p) => {
+              const spec = PLANT_CATALOG[p.species];
+              if (!spec) return null;
+              const isActive = p.id === plants.active;
+              return (
+                <div key={p.id} className={"gear-card" + (isActive ? " equipped" : "")} style={{ alignItems: "center", textAlign: "center", cursor: "pointer" }} onClick={() => setActivePlant(p.id)}>
+                  <PlantSprite species={p.species} stage={p.stage} size={52} />
+                  <span style={{ fontSize: 12, fontWeight: 500, lineHeight: 1.1 }}>{p.nickname || spec.name}</span>
+                  <div style={{ marginTop: "auto" }}>
+                    {isActive ? <span className="pill on">active</span>
+                      : <button className="btn btn-sm" onClick={(e) => { e.stopPropagation(); setActivePlant(p.id); }}>Tend</button>}
+                  </div>
                 </div>
-                <ArrowRight size={14} color="var(--muted)" style={{ marginLeft: "auto", flexShrink: 0 }} />
-              </div>
-            );
-          })}
-      </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
-      {/* QUARTERMASTER — cosmetic shop */}
+      {/* POTTING SHED — plant + cosmetic shop */}
       <div className="subq" style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
-        <ShoppingBag size={12} /> QUARTERMASTER · COSMETIC ONLY {game.inSiege && <span style={{ color: "var(--t-siege)" }}>· CLOSED (SIEGE)</span>}
+        <ShoppingBag size={12} /> POTTING SHED
       </div>
 
-      {/* AVATARS */}
-      <div className="subq" style={{ marginBottom: 7, color: "var(--pine)" }}>SURVIVORS</div>
+      {/* SEEDLINGS — buy new plants */}
+      <div className="subq" style={{ marginBottom: 7, color: "var(--pine)" }}>SEEDLINGS</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 18 }}>
+        {Object.entries(PLANT_CATALOG).map(([key, spec]) => {
+          const ownedPlant = (plants.owned || []).find((p) => p.species === key);
+          const affordable = game.gtd >= spec.cost;
+          return (
+            <div key={key} className="gear-card" style={{ alignItems: "center", textAlign: "center" }}>
+              <div style={{ fontSize: 28, margin: "4px 0" }}>{spec.emoji}</div>
+              <span style={{ fontSize: 13, fontWeight: 500 }}>{spec.name}</span>
+              <span style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.3 }}>{spec.blurb}</span>
+              <div style={{ marginTop: "auto" }}>
+                {ownedPlant ? <span className="pill on">in your greenhouse</span>
+                  : spec.cost === 0 ? <span className="pill">free (starter)</span>
+                  : <button className="btn btn-sm" disabled={!affordable} onClick={() => buyPlant(key)} style={{ opacity: affordable ? 1 : .5 }}>
+                      <Glyph />{spec.cost}
+                    </button>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* GROWERS — avatar shop */}
+      <div className="subq" style={{ marginBottom: 7, color: "var(--pine)" }}>GROWERS</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 18 }}>
         {AVATARS.map((a) => {
           const isOwned = owned(a.id);
@@ -2876,7 +2936,7 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
                 {isEquipped ? <span className="pill on">equipped</span>
                   : isOwned ? <button className="btn btn-sm" onClick={() => equipCosmetic("avatar", a)}>Equip</button>
                   : tierLocked ? <span className="pill" style={{ display: "inline-flex", gap: 3, alignItems: "center" }}><Lock size={9} /> T{a.tier}</span>
-                  : <button className="btn btn-sm" disabled={!affordable || game.inSiege} onClick={() => buyCosmetic(a)} style={{ opacity: (!affordable || game.inSiege) ? .5 : 1 }}><Glyph />{a.cost}</button>}
+                  : <button className="btn btn-sm" disabled={!affordable} onClick={() => buyCosmetic(a)} style={{ opacity: affordable ? 1 : .5 }}><Glyph />{a.cost}</button>}
               </div>
             </div>
           );
@@ -2884,20 +2944,19 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
       </div>
 
       {/* THEMES */}
-      <div className="subq" style={{ marginBottom: 7, color: "var(--clay)" }}>THEMES — RECOLOR BUTTONS &amp; BACKDROP</div>
+      <div className="subq" style={{ marginBottom: 7, color: "var(--clay)" }}>THEMES — RECOLOR THE APP</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10 }}>
         {THEMES.map((t) => {
           const isOwned = owned(t.id);
           const isEquipped = game.equipped?.theme === t.id;
           const tierLocked = rankTier(lvl.level) < t.tier;
           const affordable = game.gtd >= t.cost;
-          // mini palette preview from the theme's key colors
           const sw = t.vars ? [t.vars["--paper"], t.vars["--pine"], t.vars["--clay"], t.vars["--amber"]] : ["#f3efe6", "#2c6a55", "#bd5b27", "#c08a16"];
           return (
             <div key={t.id} className={"gear-card" + (isEquipped ? " equipped" : "") + (tierLocked ? " locked" : "")}>
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", flexShrink: 0, border: "1px solid var(--line2)" }}>
-                  {sw.map((c, i) => <div key={i} style={{ width: 12, height: 22, background: c }} />)}
+                  {sw.map((col, i) => <div key={i} style={{ width: 12, height: 22, background: col }} />)}
                 </div>
                 <span style={{ fontSize: 13, fontWeight: 500, lineHeight: 1.1 }}>{t.name}</span>
               </div>
@@ -2906,11 +2965,93 @@ function Watchtower({ threat, band, lvl, rank, game, items, projects, nexts, sta
                 {isEquipped ? <span className="pill on">active</span>
                   : isOwned ? <button className="btn btn-sm" onClick={() => equipCosmetic("theme", t)}>Apply</button>
                   : tierLocked ? <span className="pill" style={{ display: "inline-flex", gap: 3, alignItems: "center" }}><Lock size={9} /> tier {t.tier}</span>
-                  : <button className="btn btn-sm" disabled={!affordable || game.inSiege} onClick={() => buyCosmetic(t)} style={{ opacity: (!affordable || game.inSiege) ? .5 : 1 }}><Glyph />{t.cost}</button>}
+                  : <button className="btn btn-sm" disabled={!affordable} onClick={() => buyCosmetic(t)} style={{ opacity: affordable ? 1 : .5 }}><Glyph />{t.cost}</button>}
               </div>
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function FocusModal({ item, plants, onDone, onCancel }) {
+  const [startTime] = useState(() => Date.now());
+  const [elapsed, setElapsed] = useState(0);
+  const [paused, setPaused] = useState(false);
+  const [pausedAt, setPausedAt] = useState(null);
+  const [totalPaused, setTotalPaused] = useState(0);
+  const timerRef = useRef(null);
+
+  useEffect(() => {
+    if (paused) {
+      clearInterval(timerRef.current);
+      return;
+    }
+    timerRef.current = setInterval(() => {
+      setElapsed(Date.now() - startTime - totalPaused);
+    }, 1000);
+    return () => clearInterval(timerRef.current);
+  }, [paused, startTime, totalPaused]);
+
+  const minutes = Math.floor(elapsed / 60000);
+  const secs = Math.floor((elapsed % 60000) / 1000);
+  const activePlant = plants?.active ? (plants.owned || []).find((p) => p.id === plants.active) : null;
+  const speciesData = activePlant ? PLANT_CATALOG[activePlant.species] : null;
+
+  const togglePause = () => {
+    if (paused) {
+      setTotalPaused((t) => t + (Date.now() - pausedAt));
+      setPausedAt(null);
+    } else {
+      setPausedAt(Date.now());
+    }
+    setPaused((p) => !p);
+  };
+
+  return (
+    <div className="overlay" style={{ alignItems: "center" }}>
+      <div className="card rise" style={{ width: 440, maxWidth: "100%", padding: 26, textAlign: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 18, justifyContent: "center" }}>
+          <Timer size={18} color="var(--pine)" />
+          <span className="serif" style={{ fontSize: 20 }}>Focus Session</span>
+        </div>
+        <div className="serif" style={{ fontSize: 15, color: "var(--ink2)", marginBottom: 20, lineHeight: 1.4 }}>{item?.title}</div>
+        <div style={{ fontSize: 54, fontFamily: "IBM Plex Mono", fontWeight: 600, color: "var(--pine)", marginBottom: 6, letterSpacing: 2 }}>
+          {String(Math.floor(elapsed / 3600000)).padStart(2, "0")}:{String(minutes % 60).padStart(2, "0")}:{String(secs).padStart(2, "0")}
+        </div>
+        {speciesData && activePlant && (
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 20 }}>
+            {speciesData.emoji} {activePlant.nickname || speciesData.name} earns 1 XP per minute
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap" }}>
+          <button className="btn" onClick={togglePause}>{paused ? "Resume" : "Pause"}</button>
+          <button className="btn btn-accent" onClick={() => onDone(minutes)}>
+            <Check size={15} /> Done — mark complete
+          </button>
+          <button className="btn btn-ghost" onClick={() => onCancel(minutes)}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EvolutionModal({ data, onClose }) {
+  const { plant, speciesData } = data;
+  const stageData = speciesData.stages[plant.stage];
+  return (
+    <div className="overlay" style={{ alignItems: "center" }} onClick={onClose}>
+      <div className="card rise" style={{ width: 400, maxWidth: "100%", padding: 28, textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ fontSize: 16, color: "var(--pine)", marginBottom: 8 }}>✦ Your plant evolved ✦</div>
+        <PlantSprite species={plant.species} stage={plant.stage} size={96} />
+        <div className="serif" style={{ fontSize: 22, marginTop: 16 }}>{plant.nickname || speciesData.name}</div>
+        <div className="mono" style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>reached {stageData?.name || "a new stage"}</div>
+        <p style={{ fontSize: 13.5, color: "var(--ink2)", lineHeight: 1.5, marginTop: 12 }}>{speciesData.blurb}</p>
+        {plant.maxed && (
+          <div className="pill on" style={{ display: "inline-block", marginTop: 4 }}>Fully grown — now a collector's piece ✦</div>
+        )}
+        <button className="btn btn-accent" style={{ marginTop: 18 }} onClick={onClose}>Beautiful</button>
       </div>
     </div>
   );
@@ -2941,11 +3082,11 @@ function WelcomeModal({ onFinish }) {
               </div>
               <div>
                 <div className="serif" style={{ fontSize: 23, lineHeight: 1 }}>Welcome to Clearmind</div>
-                <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1, marginTop: 3 }}>A GTD SURVIVAL SYSTEM</div>
+                <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", letterSpacing: 1, marginTop: 3 }}>GTD · GREENHOUSE</div>
               </div>
             </div>
             <p style={{ fontSize: 14, color: "var(--ink2)", lineHeight: 1.5, marginTop: 0 }}>
-              The world outside is everything unprocessed in your head. The settlement you'll defend is your trusted system — capture it all, clear it, and keep your mind like water. First, what should we call you?
+              Everything unprocessed in your head goes into the inbox. Your trusted system is the greenhouse where you tend it — capture it all, clarify it, and keep your mind clear. First, what should we call you?
             </p>
             <input className="input" autoFocus placeholder="Your name" value={name}
               onChange={(e) => setName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && name.trim()) setStep(1); }} style={{ marginTop: 6 }} />
@@ -2959,7 +3100,7 @@ function WelcomeModal({ onFinish }) {
 
         {step === 1 && (
           <div className="rise">
-            <div className="serif" style={{ fontSize: 21, marginBottom: 4 }}>The Signal, {name.trim().split(" ")[0]}</div>
+            <div className="serif" style={{ fontSize: 21, marginBottom: 4 }}>Your higher horizons, {name.trim().split(" ")[0]}</div>
             <p style={{ fontSize: 13.5, color: "var(--ink2)", lineHeight: 1.5, marginTop: 4 }}>
               Before the tasks, the why. These are GTD's higher horizons — what you're walking toward. Jot whatever comes to mind (one per line), or skip and add them later from the Goals · Vision · Purpose tab.
             </p>
@@ -2977,7 +3118,7 @@ function WelcomeModal({ onFinish }) {
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 20 }}>
               <button className="btn btn-ghost" onClick={() => finish(true)}>Skip for now</button>
-              <button className="btn btn-accent" onClick={() => finish(false)}><Check size={15} /> Enter the settlement</button>
+              <button className="btn btn-accent" onClick={() => finish(false)}><Check size={15} /> Enter the greenhouse</button>
             </div>
           </div>
         )}
@@ -3032,7 +3173,7 @@ function SettingsModal({ meta, onSaveName, onOpenExport, onClose, syncEnabled, s
           <input className="input" placeholder="Your name" value={name} onChange={(e) => setName(e.target.value)} />
           <button className="btn btn-accent btn-sm" onClick={() => onSaveName(name.trim())} disabled={name.trim() === (meta.name || "")}>Save</button>
         </div>
-        {started && <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 16 }}>Surviving since {started}</div>}
+        {started && <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginBottom: 16 }}>Growing since {started}</div>}
 
         <div className="subq" style={{ marginBottom: 7 }}>ACCOUNT &amp; SYNC</div>
         {!syncEnabled ? (
