@@ -76,7 +76,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 15;
+const APP_VERSION = 16;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -214,6 +214,11 @@ const MIGRATIONS = {
       };
       return { ...all, game, plants };
     },
+  },
+  16: {
+    notes: [
+      "Fixed a bug where the What's New changelog wasn't showing after updates on synced devices.",
+    ],
   },
 };
 
@@ -1053,15 +1058,28 @@ export default function App() {
       }
 
       // Show What's New for any versions this device hasn't seen yet.
-      // Decoupled from migration so it fires even on new devices syncing from cloud.
-      if (!isNew && effectiveSeenV < APP_VERSION) {
+      // We stamp seenVersion NOW (before syncWithCloud can push meta.version
+      // to APP_VERSION from the cloud, which would make effectiveSeenV look
+      // current and skip the modal on synced devices that never saw the notes).
+      // The watermark is preMigrationV — the version the local data was at
+      // when this device opened. seenVersion is updated to APP_VERSION only
+      // after the user actually closes the modal.
+      const changelogBaseline = seenV !== null ? seenV : (isNew ? APP_VERSION : preMigrationV);
+      if (!isNew && changelogBaseline < APP_VERSION) {
         const pending = [];
-        for (let v = effectiveSeenV + 1; v <= APP_VERSION; v++) {
+        for (let v = changelogBaseline + 1; v <= APP_VERSION; v++) {
           const m = MIGRATIONS[v];
           if (m && Array.isArray(m.notes)) pending.push({ version: v, notes: m.notes });
         }
-        if (pending.length) setWhatsNew(pending);
-        // seenVersion is saved when the user closes the modal (see WhatsNewModal onClose)
+        if (pending.length) {
+          setWhatsNew(pending);
+          // Stamp seenVersion to preMigrationV now. This prevents the modal
+          // from re-showing on every reload if the user dismisses it before
+          // syncWithCloud fires (seenVersion will advance to APP_VERSION on close).
+          // It also prevents synced devices from skipping the modal because
+          // their meta.version was already bumped by the cloud.
+          if (seenV === null) store.save(KEYS.seenVersion, preMigrationV);
+        }
       }
 
       setLoaded(true);
