@@ -27,6 +27,7 @@ const KEYS = {
   game: "gtd:game",
   meta: "gtd:meta",
   plants: "gtd:plants",
+  seenVersion: "gtd:seenVersion",
 };
 const hasSandbox = typeof window !== "undefined" && window.storage;
 const hasLocal = (() => {
@@ -1019,18 +1020,25 @@ export default function App() {
         plants: await store.load(KEYS.plants, { active: "plant-starter", owned: [{ id: "plant-starter", species: "pothos", xp: 0, stage: 0, maxed: false, plantedAt: Date.now(), nickname: null }] }),
       };
       const savedMeta = await store.load(KEYS.meta, null);
+      const seenV = await store.load(KEYS.seenVersion, null);
 
       // decide: new user, returning-outdated, or current
       const isNew = !savedMeta || typeof savedMeta.version !== "number";
+      // For users without a seenVersion yet, use their pre-migration data version as the
+      // baseline so they only see notes for versions they haven't encountered before.
+      const preMigrationV = savedMeta?.version ?? 0;
+      const effectiveSeenV = seenV !== null ? seenV : (isNew ? APP_VERSION : preMigrationV);
+
       if (isNew) {
         // brand-new: stamp current version, open onboarding
         const m = { version: APP_VERSION, name: "", createdAt: Date.now(), journeyStarted: Date.now() };
         setMeta(m); store.save(KEYS.meta, m);
+        store.save(KEYS.seenVersion, APP_VERSION);
         applyLoaded(loaded);
         setOnboarding(true);
       } else if (savedMeta.version < APP_VERSION) {
-        // returning on an old save: migrate data, persist, show What's New
-        const { data, pending } = runMigrations(loaded, savedMeta.version);
+        // returning on an old save: migrate data, persist
+        const { data } = runMigrations(loaded, savedMeta.version);
         applyLoaded(data);
         // persist any reshaped slices
         store.save(KEYS.game, data.game);
@@ -1038,12 +1046,24 @@ export default function App() {
         store.save(KEYS.settings, data.settings);
         const m = { ...savedMeta, version: APP_VERSION, journeyStarted: savedMeta.journeyStarted || savedMeta.createdAt || Date.now(), updatedAt: savedMeta.updatedAt || savedMeta.journeyStarted || savedMeta.createdAt || Date.now() };
         setMeta(m); store.save(KEYS.meta, m);
-        if (pending.length) setWhatsNew(pending);
       } else {
         // up to date
         setMeta(savedMeta);
         applyLoaded(loaded);
       }
+
+      // Show What's New for any versions this device hasn't seen yet.
+      // Decoupled from migration so it fires even on new devices syncing from cloud.
+      if (!isNew && effectiveSeenV < APP_VERSION) {
+        const pending = [];
+        for (let v = effectiveSeenV + 1; v <= APP_VERSION; v++) {
+          const m = MIGRATIONS[v];
+          if (m && Array.isArray(m.notes)) pending.push({ version: v, notes: m.notes });
+        }
+        if (pending.length) setWhatsNew(pending);
+        // seenVersion is saved when the user closes the modal (see WhatsNewModal onClose)
+      }
+
       setLoaded(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1759,7 +1779,7 @@ export default function App() {
         syncEnabled={syncEnabled} session={session} syncBusy={syncBusy} lastCloudSync={lastCloudSync}
         onSignOut={doSignOut} onManualSync={manualSync} />}
       {onboarding && <WelcomeModal onFinish={finishOnboarding} />}
-      {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => setWhatsNew(null)} />}
+      {!onboarding && whatsNew && <WhatsNewModal name={meta.name} entries={whatsNew} onClose={() => { store.save(KEYS.seenVersion, APP_VERSION); setWhatsNew(null); }} />}
       {focusItemId && (
         <FocusModal item={items.find((i) => i.id === focusItemId)} plants={plants}
           onDone={(minutes) => { addPlantXp(minutes); toggleDone(focusItemId); setFocusItemId(null); }}
