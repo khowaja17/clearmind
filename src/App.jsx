@@ -5,7 +5,7 @@ import {
   Check, X, Download, Upload, RotateCcw, Flame, Sparkles, ArrowRight,
   AlertTriangle, Sun, ListChecks, Send, Clipboard, Filter, Pencil, Settings2,
   Archive, Lock, Link2, Compass, Mountain, Target, ShoppingBag, Shield, Menu,
-  Leaf, Timer, TreePine
+  Leaf, Timer, TreePine, ArrowUp, ArrowDown
 } from "lucide-react";
 import { syncEnabled } from "./supabaseClient.js";
 import { getSession, signInWithGoogle, signOut, onAuthChange, cloudLoad, cloudSave, subscribeRealtime } from "./cloudSync.js";
@@ -76,7 +76,7 @@ const store = {
    add a MIGRATIONS entry. Adding fields needs no migration (read with a fallback);
    only renames/shape-changes do.
 ============================================================================ */
-const APP_VERSION = 17;
+const APP_VERSION = 18;
 
 // Keyed by the version they were INTRODUCED in. `all` is { items, projects, habits, log,
 // settings, areas, horizons, game } — return the same shape (mutated copies are fine).
@@ -235,6 +235,12 @@ const MIGRATIONS = {
       const items = (all.items || []).map((it) => ({ areaId: null, ...it }));
       return { ...all, horizons, items };
     },
+  },
+  18: {
+    notes: [
+      "Projects and Areas of Focus can now be renamed — gear icon on projects, pencil icon on areas.",
+      "Drag-free reordering: up/down arrows let you arrange projects and areas exactly how you like.",
+    ],
   },
 };
 
@@ -466,44 +472,44 @@ const PLANT_CATALOG = {
   succulent: {
     name: "Echeveria", genus: "Echeveria", species: "elegans",
     blurb: "Stores water in its rosette of fleshy leaves. Thrives on neglect and bright indirect light.",
-    cost: 1200, emoji: "🌵", tile: "#80b4a4",
+    cost: 500, emoji: "🌵", tile: "#80b4a4",
     stages: [
-      { name: "Offset",  xpToNext: 40,  src: null, tile: "#b2dfdb" },
-      { name: "Rosette", xpToNext: 120, src: null, tile: "#80cbc4" },
-      { name: "Clump",   xpToNext: 280, src: null, tile: "#4db6ac" },
+      { name: "Offset",  xpToNext: 50,  src: null, tile: "#b2dfdb" },
+      { name: "Rosette", xpToNext: 150, src: null, tile: "#80cbc4" },
+      { name: "Clump",   xpToNext: 300, src: null, tile: "#4db6ac" },
       { name: "Colony",  xpToNext: null, src: null, tile: "#00897b" },
     ],
   },
   snake_plant: {
     name: "Snake Plant", genus: "Dracaena", species: "trifasciata",
     blurb: "Thrives in any light and survives months without water. A quiet, steadfast companion.",
-    cost: 1800, emoji: "🗡️", tile: "#558b2f",
+    cost: 1000, emoji: "🗡️", tile: "#558b2f",
     stages: [
-      { name: "Pup",     xpToNext: 50,  src: null, tile: "#dcedc8" },
-      { name: "Cluster", xpToNext: 150, src: null, tile: "#aed581" },
-      { name: "Stand",   xpToNext: 320, src: null, tile: "#7cb342" },
+      { name: "Pup",     xpToNext: 100,  src: null, tile: "#dcedc8" },
+      { name: "Cluster", xpToNext: 300, src: null, tile: "#aed581" },
+      { name: "Stand",   xpToNext: 600, src: null, tile: "#7cb342" },
       { name: "Grove",   xpToNext: null, src: null, tile: "#558b2f" },
     ],
   },
   monstera: {
     name: "Monstera", genus: "Monstera", species: "deliciosa",
     blurb: "The Swiss cheese plant — fenestrations open up as it matures into something truly dramatic.",
-    cost: 3000, emoji: "🌴", tile: "#2e7d32",
+    cost: 2000, emoji: "🌴", tile: "#2e7d32",
     stages: [
-      { name: "Seedling",    xpToNext: 60,  src: null, tile: "#c8e6c9" },
-      { name: "Juvenile",    xpToNext: 180, src: null, tile: "#66bb6a" },
-      { name: "Fenestrated", xpToNext: 400, src: null, tile: "#388e3c" },
+      { name: "Seedling",    xpToNext: 200,  src: null, tile: "#c8e6c9" },
+      { name: "Juvenile",    xpToNext: 600, src: null, tile: "#66bb6a" },
+      { name: "Fenestrated", xpToNext: 1200, src: null, tile: "#388e3c" },
       { name: "Statement",   xpToNext: null, src: null, tile: "#1b5e20" },
     ],
   },
   fiddle_leaf: {
     name: "Fiddle-Leaf Fig", genus: "Ficus", species: "lyrata",
     blurb: "Dramatic, sculptural, and famously picky. Worth every fuss once it settles in.",
-    cost: 5000, emoji: "🍃", tile: "#3e5c2a",
+    cost: 3000, emoji: "🍃", tile: "#3e5c2a",
     stages: [
-      { name: "Sapling",   xpToNext: 80,  src: null, tile: "#dcedc8" },
-      { name: "Branching", xpToNext: 240, src: null, tile: "#9ccc65" },
-      { name: "Standard",  xpToNext: 520, src: null, tile: "#558b2f" },
+      { name: "Sapling",   xpToNext: 300,  src: null, tile: "#dcedc8" },
+      { name: "Branching", xpToNext: 900, src: null, tile: "#9ccc65" },
+      { name: "Standard",  xpToNext: 1800, src: null, tile: "#558b2f" },
       { name: "Canopy",    xpToNext: null, src: null, tile: "#33691e" },
     ],
   },
@@ -1484,10 +1490,29 @@ export default function App() {
   };
   const restoreItem = (id) => { const it = items.find((i) => i.id === id); if (it && it.done) toggleDone(id); };
   const reactivateProject = (id) => updateProject(id, { status: "active" });
+  const moveProject = (id, dir) => {
+    const activeIds = projects.filter((p) => p.status === "active").map((p) => p.id);
+    const pos = activeIds.indexOf(id);
+    const swapId = activeIds[pos + dir];
+    if (!swapId) return;
+    const i1 = projects.findIndex((p) => p.id === id);
+    const i2 = projects.findIndex((p) => p.id === swapId);
+    const next = [...projects];
+    [next[i1], next[i2]] = [next[i2], next[i1]];
+    saveProjects(next);
+  };
 
   // ---- area ops (Horizon 2) ----
   const addArea = (title) => { if (!title.trim()) return; saveAreas([...areas, { id: uid(), title: title.trim(), notes: "", createdAt: Date.now() }]); };
   const updateArea = (id, patch) => saveAreas(areas.map((a) => a.id === id ? { ...a, ...patch } : a));
+  const moveArea = (id, dir) => {
+    const idx = areas.findIndex((a) => a.id === id);
+    const swap = idx + dir;
+    if (swap < 0 || swap >= areas.length) return;
+    const next = [...areas];
+    [next[idx], next[swap]] = [next[swap], next[idx]];
+    saveAreas(next);
+  };
   const deleteArea = (id) => {
     saveAreas(areas.filter((a) => a.id !== id));
     saveProjects(projects.map((p) => p.areaId === id ? { ...p, areaId: null } : p)); // unfile, don't delete projects
@@ -1832,7 +1857,7 @@ export default function App() {
         <div className="content-scroll" style={{ flex: 1, overflow: "auto", padding: "22px" }}>
           {view === "greenhouse" && <Greenhouse {...{ lvl, rank, game, buyCosmetic, equipCosmetic, plants, buyPlant, setActivePlant }} />}
           {view === "today" && <TodayView {...{ inbox, nextsByCtx, filteredNexts, scheduled, todayHabits, log, toggleLog, stalled, setView, toggleDone, projName, daysSinceReview, onEdit: setEditId, items, name: meta.name, onStart: setFocusItemId, contexts, ctxFilter, setCtxFilter, blockedCount, onManageCtx: () => setCtxMgrOpen(true), setClarifyId }} />}
-          {view === "projects" && <ProjectsView {...{ activeProjects, allItems: items, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit: setEditId, areas, assignProjectArea, onStart: setFocusItemId }} />}
+          {view === "projects" && <ProjectsView {...{ activeProjects, allItems: items, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit: setEditId, areas, assignProjectArea, onStart: setFocusItemId, moveProject }} />}
           {view === "waiting" && <WaitingView {...{ waiting, toggleDone, updateItem, deleteItem, onEdit: setEditId }} />}
           {view === "calendar" && <CalendarView {...{ scheduled, toggleDone, deleteItem, onEdit: setEditId }} />}
           {view === "someday" && <SomedayView {...{ somedays, updateItem, deleteItem, onEdit: setEditId }} />}
@@ -1840,7 +1865,7 @@ export default function App() {
           {view === "habits" && <HabitsView {...{ habits, log, toggleLog, addHabit, deleteHabit, updateHabit, purposes: horizons.purpose || [], setView }} />}
           {view === "review" && <ReviewView {...{ inbox, nexts, waiting, stalled, somedays, setView, settings, daysSinceReview, completeReview, gate: reviewAllowed() }} />}
           {view === "archive" && <ArchiveView {...{ completedItems, completedProjects, projName, restoreItem, deleteItem, reactivateProject, deleteProject }} />}
-          {view === "areas" && <AreasView {...{ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit: setEditId, horizons, items, setView }} />}
+          {view === "areas" && <AreasView {...{ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit: setEditId, horizons, items, setView, moveArea }} />}
           {view === "horizons" && <HorizonsView {...{ horizons, areas, addHorizon, updateHorizon, deleteHorizon, setView, setOpenArea }} />}
           {view === "canopy" && <CanopyView {...{ horizons, areas, projects: activeProjects, items, setView, setOpenArea }} />}
         </div>
@@ -2119,11 +2144,13 @@ function NextView({ nextsByCtx, contexts, ctxFilter, setCtxFilter, toggleDone, p
   );
 }
 
-function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit, areas, assignProjectArea, onStart }) {
+function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExpanded, addProject, updateProject, deleteProject, addActionToProject, toggleDone, updateItem, isBlocked, contexts, onEdit, areas, assignProjectArea, onStart, moveProject }) {
   const [np, setNp] = useState("");
   const [menuFor, setMenuFor] = useState(null); // project id whose settings menu is open
   const [menuPos, setMenuPos] = useState(null); // {top,right} anchor for the fixed popover
   const [confirmDel, setConfirmDel] = useState(null); // project id pending delete confirm
+  const [renameId, setRenameId] = useState(null);
+  const [renameText, setRenameText] = useState("");
   const areaName = (id) => areas.find((a) => a.id === id)?.title;
   const menuProject = activeProjects.find((p) => p.id === menuFor);
   return (
@@ -2156,13 +2183,21 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
                     {areaName(p.areaId) && <span> · <Compass size={9} style={{ verticalAlign: -1 }} /> {areaName(p.areaId)}</span>}
                   </div>
                 </div>
-                <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                  <button className="btn btn-sm btn-ghost" title="Move up" style={{ padding: "3px 5px" }}
+                    onClick={() => moveProject(p.id, -1)}>
+                    <ArrowUp size={13} />
+                  </button>
+                  <button className="btn btn-sm btn-ghost" title="Move down" style={{ padding: "3px 5px" }}
+                    onClick={() => moveProject(p.id, 1)}>
+                    <ArrowDown size={13} />
+                  </button>
                   <button className="btn btn-sm btn-ghost" title="Project settings"
                     onClick={(e) => {
                       if (menuFor === p.id) { setMenuFor(null); return; }
                       const r = e.currentTarget.getBoundingClientRect();
                       setMenuPos({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
-                      setMenuFor(p.id); setConfirmDel(null);
+                      setMenuFor(p.id); setConfirmDel(null); setRenameId(null);
                     }}>
                     <Settings2 size={14} />
                   </button>
@@ -2180,7 +2215,27 @@ function ProjectsView({ activeProjects, allItems, projectNexts, expanded, setExp
     {menuProject && menuPos && (
       <>
         <div style={{ position: "fixed", inset: 0, zIndex: 80 }} onClick={() => { setMenuFor(null); setConfirmDel(null); }} />
-        <div className="card" style={{ position: "fixed", top: menuPos.top, right: menuPos.right, zIndex: 81, width: 230, padding: 10, boxShadow: "0 10px 28px rgba(0,0,0,.20)" }}>
+        <div className="card" style={{ position: "fixed", top: menuPos.top, right: menuPos.right, zIndex: 81, width: 250, padding: 10, boxShadow: "0 10px 28px rgba(0,0,0,.20)" }}>
+          <div style={{ marginBottom: 10 }}>
+            <div className="subq" style={{ marginBottom: 5 }}>RENAME</div>
+            {renameId === menuProject.id ? (
+              <div style={{ display: "flex", gap: 5 }}>
+                <input className="input" style={{ flex: 1, padding: "5px 8px", fontSize: 12.5 }} value={renameText}
+                  autoFocus
+                  onChange={(e) => setRenameText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && renameText.trim()) { updateProject(menuProject.id, { title: renameText.trim() }); setRenameId(null); setMenuFor(null); }
+                    if (e.key === "Escape") setRenameId(null);
+                  }} />
+                <button className="btn btn-accent btn-sm" onClick={() => { if (renameText.trim()) { updateProject(menuProject.id, { title: renameText.trim() }); setRenameId(null); setMenuFor(null); } }}><Check size={13} /></button>
+              </div>
+            ) : (
+              <button className="btn btn-ghost btn-sm" style={{ width: "100%", justifyContent: "flex-start" }}
+                onClick={() => { setRenameId(menuProject.id); setRenameText(menuProject.title); }}>
+                <Pencil size={13} /> Edit name…
+              </button>
+            )}
+          </div>
           {areas.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div className="subq" style={{ marginBottom: 5 }}>AREA OF FOCUS</div>
@@ -2663,8 +2718,10 @@ function ArchiveView({ completedItems, completedProjects, projName, restoreItem,
   );
 }
 
-function AreasView({ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit, horizons, items, setView }) {
+function AreasView({ areas, projects, activeProjects, projectNexts, isBlocked, addArea, updateArea, deleteArea, assignProjectArea, toggleDone, openArea, setOpenArea, onEdit, horizons, items, setView, moveArea }) {
   const [na, setNa] = useState("");
+  const [renameId, setRenameId] = useState(null);
+  const [renameText, setRenameText] = useState("");
   const projectsIn = (aid) => activeProjects.filter((p) => p.areaId === aid);
   const goalsIn = (aid) => (horizons.goals || []).filter((g) => g.areaId === aid);
   const unfiled = activeProjects.filter((p) => !p.areaId);
@@ -2693,12 +2750,43 @@ function AreasView({ areas, projects, activeProjects, projectNexts, isBlocked, a
                 </button>
                 <Compass size={15} color="var(--pine)" />
                 <div style={{ flex: 1 }}>
-                  <div className="serif" style={{ fontSize: 16 }}>{a.title}</div>
-                  <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
-                    {ps.length} project{ps.length !== 1 ? "s" : ""} · {totalActionable} actionable{gs.length ? ` · ${gs.length} goal${gs.length > 1 ? "s" : ""}` : ""}
-                  </div>
+                  {renameId === a.id ? (
+                    <div style={{ display: "flex", gap: 5, alignItems: "center" }} onClick={(e) => e.stopPropagation()}>
+                      <input className="input" style={{ flex: 1, padding: "4px 7px", fontSize: 13.5 }} value={renameText} autoFocus
+                        onChange={(e) => setRenameText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && renameText.trim()) { updateArea(a.id, { title: renameText.trim() }); setRenameId(null); }
+                          if (e.key === "Escape") setRenameId(null);
+                        }} />
+                      <button className="btn btn-accent btn-sm" onClick={() => { if (renameText.trim()) { updateArea(a.id, { title: renameText.trim() }); setRenameId(null); } }}><Check size={13} /></button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setRenameId(null)}><X size={13} /></button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="serif" style={{ fontSize: 16 }}>{a.title}</div>
+                      <div className="mono" style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 2 }}>
+                        {ps.length} project{ps.length !== 1 ? "s" : ""} · {totalActionable} actionable{gs.length ? ` · ${gs.length} goal${gs.length > 1 ? "s" : ""}` : ""}
+                      </div>
+                    </>
+                  )}
                 </div>
-                <button className="btn btn-sm btn-danger" onClick={() => deleteArea(a.id)} title="Delete area (projects are unfiled, not deleted)"><Trash2 size={13} /></button>
+                {renameId !== a.id && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    <button className="btn btn-sm btn-ghost" title="Rename area" style={{ padding: "3px 5px" }}
+                      onClick={(e) => { e.stopPropagation(); setRenameId(a.id); setRenameText(a.title); }}>
+                      <Pencil size={13} />
+                    </button>
+                    <button className="btn btn-sm btn-ghost" title="Move up" style={{ padding: "3px 5px" }}
+                      onClick={() => moveArea(a.id, -1)}>
+                      <ArrowUp size={13} />
+                    </button>
+                    <button className="btn btn-sm btn-ghost" title="Move down" style={{ padding: "3px 5px" }}
+                      onClick={() => moveArea(a.id, 1)}>
+                      <ArrowDown size={13} />
+                    </button>
+                    <button className="btn btn-sm btn-danger" onClick={() => deleteArea(a.id)} title="Delete area (projects are unfiled, not deleted)"><Trash2 size={13} /></button>
+                  </div>
+                )}
               </div>
               {open && (
                 <div style={{ padding: "12px 14px" }}>
