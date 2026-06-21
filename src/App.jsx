@@ -3286,7 +3286,8 @@ function StatusStrip({ lvl, rank, gtd, plants, onClick }) {
         <Leaf size={14} color="var(--pine)" />
         {activePlant && speciesData ? (
           <>
-            <span style={{ color: "var(--pine)", fontWeight: 600 }}>{speciesData.emoji} {speciesData.name}</span>
+            <PlantSprite species={activePlant.species} stage={activePlant.stage} size={26} />
+            <span style={{ color: "var(--pine)", fontWeight: 600 }}>{speciesData.name}</span>
             <span style={{ color: "var(--muted)", fontSize: 11 }}>{stageData ? stageData.name : ""}</span>
             {stageData && stageData.xpToNext && (
               <div className="xp-bar" style={{ width: 48 }}>
@@ -3426,7 +3427,7 @@ function Greenhouse({ lvl, rank, game, buyCosmetic, equipCosmetic, plants, buyPl
           const affordable = game.gtd >= spec.cost;
           return (
             <div key={key} className="gear-card" style={{ alignItems: "center", textAlign: "center" }}>
-              <div style={{ fontSize: 28, margin: "4px 0" }}>{spec.emoji}</div>
+              <div style={{ margin: "4px auto" }}><PlantSprite species={key} stage={0} size={56} /></div>
               <span style={{ fontSize: 13, fontWeight: 500 }}>{spec.name}</span>
               <span style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.3 }}>{spec.blurb}</span>
               <div style={{ marginTop: "auto" }}>
