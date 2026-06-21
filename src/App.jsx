@@ -242,6 +242,12 @@ const MIGRATIONS = {
       "Drag-free reordering: up/down arrows let you arrange projects and areas exactly how you like.",
     ],
   },
+  19: {
+    notes: [
+      "Updated the pothos avatar art.",
+      "Please be patient as it is still a work in progress!"
+    ],
+  },
   
 };
 
