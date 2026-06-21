@@ -463,10 +463,10 @@ const PLANT_CATALOG = {
     blurb: "Nearly unkillable and happy in low light. Likes to trail and be forgotten about — in a good way.",
     cost: 0, emoji: "🌿", tile: "#4a8a6a",
     stages: [
-      { name: "Cutting",  xpToNext: 30,  src: null, tile: "#c8e6c9" },
-      { name: "Rooted",   xpToNext: 90,  src: null, tile: "#81c784" },
-      { name: "Trailing", xpToNext: 200, src: null, tile: "#4caf50" },
-      { name: "Lush",     xpToNext: null, src: null, tile: "#2e7d32" },
+      { name: "Cutting",  xpToNext: 30,   src: "/plants/pothos-0.png", tile: "#c8e6c9" },
+      { name: "Rooted",   xpToNext: 90,   src: "/plants/pothos-1.png", tile: "#81c784" },
+      { name: "Trailing", xpToNext: 200,  src: "/plants/pothos-2.png", tile: "#4caf50" },
+      { name: "Lush",     xpToNext: null, src: "/plants/pothos-3.png", tile: "#2e7d32" },
     ],
   },
   succulent: {
