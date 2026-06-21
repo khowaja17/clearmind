@@ -148,6 +148,67 @@ clients to pick up a new version immediately, bump the cache version in
 
 ---
 
+## Adding custom plant sprites
+
+Plant images are embedded as **base64 data URIs** directly in `src/App.jsx` —
+the same pattern as the grower avatars. This keeps the app self-contained with
+no external asset dependencies.
+
+### Where the data lives
+
+Find `PLANT_CATALOG` near the top of `App.jsx`. Each species has a `stages`
+array; each stage has a `src` field that accepts either `null` (falls back to a
+colored tile + emoji) or a `"data:image/png;base64,..."` string.
+
+```js
+pothos: {
+  stages: [
+    { name: "Cutting",  xpToNext: 30,   src: "data:image/png;base64,iVBOR...", tile: "#c8e6c9" },
+    { name: "Rooted",   xpToNext: 90,   src: "data:image/png;base64,iVBOR...", tile: "#81c784" },
+    { name: "Trailing", xpToNext: 200,  src: "data:image/png;base64,iVBOR...", tile: "#4caf50" },
+    { name: "Lush",     xpToNext: null, src: "data:image/png;base64,iVBOR...", tile: "#2e7d32" },
+  ],
+},
+```
+
+### Adding images for a new species
+
+**Step 1 — Convert your PNG to a base64 data URI.**
+
+Run this from the project root (requires Python, which ships with macOS/Linux;
+install from python.org on Windows):
+
+```bash
+python -c "import base64; print('data:image/png;base64,' + base64.b64encode(open('your-image.png','rb').read()).decode())"
+```
+
+This prints the full data URI to the terminal. Copy it.
+
+**Step 2 — Paste it into the matching `src` field in `PLANT_CATALOG`.**
+
+Find the species and stage (e.g. `succulent` → stage 0 = "Offset") and replace
+`src: null` with `src: "<paste here>"`.
+
+**Step 3 — Bump the service worker cache version.**
+
+In `public/sw.js`, increment the version string so installed clients refresh:
+
+```js
+const CACHE = "clearmind-v22"; // → "clearmind-v23"
+```
+
+**Step 4 — Push.** The GitHub Action rebuilds and deploys automatically.
+
+### Image recommendations
+
+- **Format:** PNG with transparency
+- **Size:** 192 × 192 px works well across all display sizes
+- **Style:** 8-bit / pixel art — sprites are rendered with `image-rendering: pixelated`
+  so they stay crisp at any display size without blurring
+- Stage images should read clearly at small sizes (the status bar shows them at ~26 px)
+
+---
+
 ## File map
 
 ```
